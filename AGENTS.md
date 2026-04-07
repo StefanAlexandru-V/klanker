@@ -9,29 +9,45 @@
 | Run all tests | `npm test` |
 | Watch tests | `npm run test:watch` |
 | Run single test file | `npx vitest run src/__tests__/api.test.js` |
+| Start SearXNG | `docker start klanker-searxng` |
+| Restart SearXNG | `docker restart klanker-searxng` |
 
 ## Architecture
 
-Svelte 5 + Vite chat app that streams responses from an LM Studio OpenAI-compatible API via SSE.
+Svelte 5 + Vite chat app that streams responses from an LM Studio OpenAI-compatible API via SSE. Web search via local SearXNG instance (Docker).
 
 ```
 src/
   main.js                  # Mounts App into #app
-  App.svelte               # Root layout: header, error bar, Chat, Input
-  app.css                  # Global styles, CSS custom properties, dark theme
+  App.svelte               # Root layout: sidebar-rail, header, chat, input
+  app.css                  # Global styles — Linear design system tokens
   lib/
     api.js                 # streamChat() async generator — SSE streaming client
     store.svelte.js        # createChatStore() — reactive state via Svelte 5 runes
+    db.js                  # IndexedDB wrapper for conversation persistence
+    fileParser.js          # Text extraction from file types (PDF, DOCX, XLSX, etc.)
+    fileHandler.js         # File processing pipeline (image/document handling)
+    search.js              # Web search integration via SearXNG
   components/
-    Chat.svelte            # Scrollable message list with auto-scroll and typing indicator
-    Message.svelte          # Single message bubble (user right, assistant left)
-    Input.svelte            # Textarea + send button, Enter/Shift+Enter handling
+    Chat.svelte            # Scrollable message list with smart auto-scroll + scroll-to-bottom
+    Message.svelte         # Message bubble orchestrator (markdown + citation styling)
+    MessageAttachments.svelte  # Image and file attachment display
+    MessageSources.svelte  # Web search source citation chips
+    ThinkingBlock.svelte   # Collapsible reasoning/thought display
+    Input.svelte           # Textarea + send/stop buttons + drag-and-drop
+    FileAttachments.svelte # Pending file/image attachment UI
+    Sidebar.svelte         # Conversation list layout shell
+    ConversationItem.svelte # Single conversation row with context menu + auto-focus rename
+    SearchBox.svelte       # Search input with clear button
+    ModelSelector.svelte   # Model dropdown with keyboard navigation + auto-focus
   __tests__/
     api.test.js            # streamChat tests with mocked fetch/ReadableStream
-    store.test.js          # Store integration test with mocked API
+    store.test.js          # Store integration tests (35 tests: send, search flow, reasoning, sources)
 ```
 
 **Data flow:** `Input` → `App.send()` → `store.send()` → `streamChat()` yields tokens → store mutates `$state` → `Chat`/`Message` re-render reactively.
+
+**Search flow:** Model outputs `[SEARCH: query]` → `store.send()` detects it → calls `webSearch()` (SearXNG via `/search` proxy) → injects results into system prompt → model responds with citations `[1]`, `[2]` → `Message.svelte` renders citations as styled inline badges.
 
 ## Key Conventions
 
@@ -40,8 +56,18 @@ src/
 - Store file uses `.svelte.js` extension so Vite compiles runes outside `.svelte` files.
 - **No UI libraries** — all styling is plain CSS with scoped `<style>` blocks per component.
 - All colors/spacing use CSS custom properties defined in `app.css`.
-- Components target < 100 lines each.
+- **Linear design system** — muted, semi-transparent surfaces. No loud accent fills on inline elements. Use `--bg-tertiary` + `--border-light` for badges/chips, not `--accent`.
+- Components target < 200 lines each.
 - All API logic isolated in `src/lib/api.js`; components never call `fetch` directly.
+
+## Services
+
+| Service | URL | Config |
+|---------|-----|--------|
+| LM Studio API | `http://10.3.58.20:1234/v1` | Proxied via Vite `/v1` |
+| SearXNG | `http://localhost:8888` | Docker `klanker-searxng`, proxied via Vite `/search` |
+
+SearXNG config is volume-mounted from `./searxng/settings.yml`. The `formats` list MUST include `json` — without it, the `/search?format=json` endpoint returns 403.
 
 ## Environment Variables
 
@@ -57,7 +83,7 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 
 - **Vitest** with node environment — no DOM/browser needed for current tests.
 - `api.test.js` mocks `fetch` with `vi.stubGlobal` and constructs `ReadableStream` to simulate SSE chunks.
-- `store.test.js` mocks `../lib/api.js` module to isolate store logic from network.
+- `store.test.js` mocks `../lib/api.js` module to isolate store logic from network. Includes search flow tests covering reasoning-as-content, multi-round search, source dedup, and buffered streaming.
 - Svelte plugin processes `.svelte.js` files during test runs, so runes work in tests.
 
 ## Gotchas
@@ -66,6 +92,23 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 - SSE parsing in `api.js` handles chunks split across `ReadableStream` reads by buffering incomplete lines — don't assume one read = one SSE event.
 - `streamChat` is an **async generator** — consumers must use `for await...of` and handle `AbortError` for cancellation.
 - The store sends the full conversation history (including system prompt) on every request — there is no server-side session.
+- **Search buffering**: `streamResponse` buffers content when `bufferForSearch: true` to detect `[SEARCH:]` directives before writing to reactive state. Some models (Qwen) dump reasoning as content tokens — the search loop extracts text before `[SEARCH:]` and moves it to `msg.reasoning`.
+- **SearXNG JSON format**: Must be enabled in `searxng/settings.yml` under `search.formats`. Without it, all JSON API calls return 403.
+- **System prompt is in `store.svelte.js`**: The `SYSTEM_PROMPT` constant contains vision, search, and behavior instructions. When tuning model behavior, edit it there. The prompt tells the model it CAN see images and CAN search for anything (links, resources, galleries, etc.).
+
+## Dev Server
+
+Always keep the dev server running with hot reload during development:
+
+```bash
+npm run dev
+```
+
+Vite HMR auto-updates the browser on file changes. If the port is occupied, kill the old process first:
+
+```bash
+kill $(lsof -ti :5173) 2>/dev/null; npm run dev
+```
 
 ## MemPalace — Persistent Memory
 
