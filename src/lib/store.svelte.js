@@ -24,6 +24,10 @@ Your training data has a knowledge cutoff around early 2024. You may not have ac
 - If you cannot help with something, say so briefly without lecturing or moralizing.
 - Ask at most one clarifying question per response, and only when genuinely needed.
 
+# Vision
+- You CAN see and analyze images that users attach. Describe them directly.
+- Do NOT say you cannot see images — you can.
+
 # Accuracy and honesty
 - If you are unsure about a fact, say so explicitly rather than guessing.
 - If the user makes a claim you doubt, check it rather than blindly agreeing.
@@ -32,34 +36,37 @@ Your training data has a knowledge cutoff around early 2024. You may not have ac
 - Never fabricate URLs, citations, statistics, or quotes.
 
 # Web search tool
-You can search the web when you need current or uncertain information. To search, respond with ONLY this exact line and absolutely nothing else:
+You have access to a web search tool. To use it, your ENTIRE response must be exactly one line:
 
 [SEARCH: your search query]
 
-CRITICAL: When searching, your entire response must be ONLY the [SEARCH: ...] line. No other text, no explanation, no sources list. Just the single line.
-
-Search query tips:
-- Keep queries short and specific (3-8 words).
-- Use keywords, not full sentences.
+Rules:
+- The line above must be your COMPLETE response. No other text before or after it.
+- Do NOT explain why you are searching. Do NOT include reasoning. Just the [SEARCH: ...] line.
+- Keep queries short: 3-8 keywords.
+- You can search for anything: news, facts, links, resources, image galleries, guides, etc.
 
 When to search:
-- Current events, recent news, live data, prices, weather, sports, software releases, anything time-sensitive.
-- When you are not confident in your factual knowledge or accuracy matters.
+- Current events, recent news, live data, prices, weather, sports scores, software versions.
+- When the user asks for links, resources, or recommendations you don't have from memory.
+- When you are not confident in your factual knowledge.
 
 When NOT to search:
-- Basic math, well-established knowledge, coding patterns, creative writing, or anything you are confident about.
+- Basic knowledge, coding, creative writing, math, or anything you are confident about.
+- Analyzing images the user attached — you can see them directly.
 
 After receiving search results:
 - Answer the user's question using the search data.
-- Weave citations naturally into your response using [1], [2], etc.
+- Cite sources naturally using [1], [2], etc.
 - Do NOT list sources separately — the UI displays them automatically.
 
 # Formatting
-- Use plain prose for conversational replies. Do not use bullet lists or markdown in casual chat.
+- Use plain prose for conversational replies. No bullet lists or markdown in casual chat.
 - Use markdown (headings, lists, tables, code blocks) for technical content, comparisons, or structured information.
 - Use code blocks with language tags for any code snippets.`;
 
 const SEARCH_PATTERN = /\[SEARCH:\s*(.+?)\]/;
+const SEARCH_ONLY_PATTERN = /^\s*\[SEARCH:\s*(.+?)\]\s*$/;
 const MAX_SEARCH_ROUNDS = 3;
 
 let _convId = 0;
@@ -243,21 +250,42 @@ export function createChatStore() {
   }
 
   /**
+   * Streams a chat response, optionally buffering content to detect [SEARCH:] directives.
+   * When bufferForSearch is true, content is held back until we can confirm it's not a
+   * search directive. If the model dumps reasoning as content tokens (no reasoning_content),
+   * the text before [SEARCH:] is captured as reasoning instead.
+   *
    * @param {Array<{role: string, content: string}>} apiMessages
    * @param {object} conv
    * @param {number} assistantIdx
+   * @param {{bufferForSearch?: boolean}} [opts]
    * @returns {Promise<string>}
    */
-  async function streamResponse(apiMessages, conv, assistantIdx) {
+  async function streamResponse(apiMessages, conv, assistantIdx, opts = {}) {
     let fullText = '';
+    const msg = conv.messages[assistantIdx];
+
     for await (const token of streamChat(selectedModel, apiMessages, abortController.signal)) {
       if (token.type === 'reasoning') {
-        const msg = conv.messages[assistantIdx];
         msg.reasoning = (msg.reasoning || '') + token.text;
       } else {
-        const msg = conv.messages[assistantIdx];
-        msg.content = (msg.content || '') + token.text;
         fullText += token.text;
+
+        if (opts.bufferForSearch) {
+          const trimmed = fullText.trim();
+          const searchIdx = trimmed.lastIndexOf('[SEARCH:');
+          if (searchIdx !== -1) {
+            const afterSearch = trimmed.slice(searchIdx);
+            if (!afterSearch.includes(']')) {
+              continue;
+            }
+            if (SEARCH_PATTERN.test(afterSearch)) {
+              continue;
+            }
+          }
+        }
+
+        msg.content = fullText;
       }
     }
     return fullText;
@@ -319,24 +347,28 @@ export function createChatStore() {
         ...historyMessages,
       ];
 
-      let responseText = await streamResponse(apiMessages, conv, assistantIdx);
+      let responseText = await streamResponse(apiMessages, conv, assistantIdx, { bufferForSearch: true });
 
       let searchRounds = 0;
       while (searchRounds < MAX_SEARCH_ROUNDS) {
-        const match = responseText.trim().match(SEARCH_PATTERN);
+        const match = responseText.match(SEARCH_PATTERN);
         if (!match) break;
 
         const searchTerm = match[1];
         searchRounds++;
 
-        const prevSources = conv.messages[assistantIdx].sources;
-        conv.messages[assistantIdx] = {
-          ...conv.messages[assistantIdx],
-          content: '',
-          reasoning: '',
-          searchQuery: searchTerm,
-          sources: prevSources,
-        };
+        const msg = conv.messages[assistantIdx];
+
+        const searchIdx = responseText.indexOf(match[0]);
+        const textBeforeSearch = responseText.slice(0, searchIdx).trim();
+        if (textBeforeSearch && !msg.reasoning) {
+          msg.reasoning = textBeforeSearch;
+        } else if (textBeforeSearch && msg.reasoning) {
+          msg.reasoning += '\n\n' + textBeforeSearch;
+        }
+
+        msg.content = '';
+        msg.searchQuery = searchTerm;
 
         searching = true;
         let searchContext = '';
@@ -344,13 +376,9 @@ export function createChatStore() {
           const results = await webSearch(searchTerm);
           if (results.length > 0) {
             searchContext = formatSearchContext(searchTerm, results);
-            conv.messages[assistantIdx] = {
-              ...conv.messages[assistantIdx],
-              sources: [
-                ...(conv.messages[assistantIdx].sources || []),
-                ...results,
-              ],
-            };
+            const existingUrls = new Set((msg.sources || []).map((s) => s.url));
+            const newResults = results.filter((r) => !existingUrls.has(r.url));
+            msg.sources = [...(msg.sources || []), ...newResults];
           }
         } catch {
           searchContext = `Web search for "${searchTerm}" failed.`;
@@ -363,7 +391,7 @@ export function createChatStore() {
           ...historyMessages,
         ];
 
-        responseText = await streamResponse(apiMessages, conv, assistantIdx);
+        responseText = await streamResponse(apiMessages, conv, assistantIdx, { bufferForSearch: true });
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
