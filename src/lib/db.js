@@ -54,12 +54,3 @@ export async function deleteConversation(id) {
   const db = await getDb();
   await db.delete(STORE_NAME, id);
 }
-
-/**
- * Deletes all conversations.
- * @returns {Promise<void>}
- */
-export async function clearConversations() {
-  const db = await getDb();
-  await db.clear(STORE_NAME);
-}
