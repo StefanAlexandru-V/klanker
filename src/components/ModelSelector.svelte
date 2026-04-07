@@ -11,6 +11,15 @@
   let { models, selectedModel, modelsLoading, onSelect, onRefresh } = $props();
 
   let open = $state(false);
+  let focusedIndex = $state(-1);
+  let dropdownEl = $state(null);
+
+  $effect(() => {
+    if (open && dropdownEl) {
+      dropdownEl.focus();
+      focusedIndex = models.findIndex((m) => m.id === selectedModel);
+    }
+  });
 
   function formatName(id) {
     const parts = id.split('/');
@@ -25,6 +34,39 @@
   function handleClickOutside(e) {
     if (open && !e.target.closest('.model-selector')) {
       open = false;
+      focusedIndex = -1;
+    }
+  }
+
+  /** @param {KeyboardEvent} e */
+  function handleTriggerKeydown(e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) open = true;
+    } else if (e.key === 'Escape' && open) {
+      open = false;
+      focusedIndex = -1;
+    }
+  }
+
+  /** @param {KeyboardEvent} e */
+  function handleDropdownKeydown(e) {
+    if (!open || models.length === 0) return;
+    e.stopPropagation();
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      focusedIndex = (focusedIndex + 1) % models.length;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      focusedIndex = (focusedIndex - 1 + models.length) % models.length;
+    } else if (e.key === 'Enter' && focusedIndex >= 0) {
+      e.preventDefault();
+      select(models[focusedIndex].id);
+      focusedIndex = -1;
+    } else if (e.key === 'Escape') {
+      open = false;
+      focusedIndex = -1;
     }
   }
 </script>
@@ -32,7 +74,7 @@
 <svelte:window onclick={handleClickOutside} />
 
 <div class="model-selector">
-  <button class="trigger" onclick={(e) => { e.stopPropagation(); open = !open; }}>
+  <button class="trigger" onclick={(e) => { e.stopPropagation(); open = !open; }} onkeydown={handleTriggerKeydown}>
     {#if modelsLoading}
       <span class="dot loading"></span>
       <span class="label">Loading…</span>
@@ -49,7 +91,7 @@
   </button>
 
   {#if open && models.length > 0}
-    <div class="dropdown" role="listbox" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+    <div bind:this={dropdownEl} class="dropdown" role="listbox" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={handleDropdownKeydown}>
       <div class="dropdown-header">
         <span>Models</span>
         <button class="refresh" onclick={onRefresh} aria-label="Refresh models" title="Refresh models">
@@ -60,10 +102,13 @@
           </svg>
         </button>
       </div>
-      {#each models as model (model.id)}
+      {#each models as model, i (model.id)}
         <button
           class="option"
           class:active={model.id === selectedModel}
+          class:focused={focusedIndex === i}
+          role="option"
+          aria-selected={model.id === selectedModel}
           onclick={() => select(model.id)}
         >
           <div class="option-info">
@@ -181,7 +226,7 @@
     text-align: left;
     color: var(--text-secondary);
   }
-  .option:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .option:hover, .option.focused { background: var(--bg-hover); color: var(--text-primary); }
   .option.active { color: var(--text-primary); }
 
   .option-info {

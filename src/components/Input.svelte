@@ -1,5 +1,6 @@
 <script>
-  import { extractText, isSupported, supportedTypesLabel } from '../lib/fileParser.js';
+  import { processFiles } from '../lib/fileHandler.js';
+  import FileAttachments from './FileAttachments.svelte';
 
   /**
    * @type {{
@@ -22,9 +23,6 @@
   let fileError = $state('');
   let parsing = $state(false);
 
-  const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-  const MAX_SIZE = 10 * 1024 * 1024;
-
   function handleSubmit() {
     if (loading) { onStop(); return; }
     if ((!text.trim() && pendingFiles.length === 0 && pendingImages.length === 0) || disabled) return;
@@ -33,7 +31,9 @@
     pendingFiles = [];
     pendingImages = [];
     fileError = '';
-    if (textareaEl) textareaEl.style.height = 'auto';
+    if (textareaEl) {
+      textareaEl.style.height = 'auto';
+    }
   }
 
   /** @param {KeyboardEvent} e */
@@ -43,6 +43,11 @@
       handleSubmit();
     }
   }
+
+  $effect(() => {
+    void text;
+    if (textareaEl) autoResize();
+  });
 
   function autoResize() {
     if (!textareaEl) return;
@@ -54,73 +59,24 @@
     fileInputEl?.click();
   }
 
-  /**
-   * Reads a File as a base64 data URL.
-   * @param {File} file
-   * @returns {Promise<string>}
-   */
-  function readAsDataUrl(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(/** @type {string} */ (reader.result));
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
-
   /** @param {FileList} fileList */
-  async function processFiles(fileList) {
+  async function handleFiles(fileList) {
     fileError = '';
-    const skipped = [];
-
-    for (const file of fileList) {
-      if (file.size > MAX_SIZE) {
-        skipped.push(`${file.name} (too large, max 10 MB)`);
-        continue;
-      }
-
-      if (IMAGE_TYPES.has(file.type)) {
-        if (pendingImages.some((i) => i.name === file.name)) continue;
-        try {
-          const dataUrl = await readAsDataUrl(file);
-          pendingImages.push({ name: file.name, dataUrl, size: file.size });
-          pendingImages = pendingImages;
-        } catch {
-          skipped.push(`${file.name} (could not read image)`);
-        }
-        continue;
-      }
-
-      if (pendingFiles.some((f) => f.name === file.name)) continue;
-      if (!isSupported(file)) {
-        skipped.push(`${file.name} (unsupported type)`);
-        continue;
-      }
-      try {
-        parsing = true;
-        const result = await extractText(file);
-        if (!result.content.trim()) {
-          skipped.push(`${file.name} (no text content found)`);
-          continue;
-        }
-        pendingFiles.push(result);
-        pendingFiles = pendingFiles;
-      } catch (err) {
-        skipped.push(`${file.name} (${err.message})`);
-      } finally {
-        parsing = false;
-      }
-    }
-
-    if (skipped.length > 0) {
-      fileError = `Skipped: ${skipped.join(', ')}. Supported: images, ${supportedTypesLabel()}`;
+    parsing = true;
+    try {
+      const result = await processFiles(fileList, pendingFiles, pendingImages);
+      pendingFiles = result.files;
+      pendingImages = result.images;
+      fileError = result.error;
+    } finally {
+      parsing = false;
     }
   }
 
   /** @param {Event} e */
   async function handleFileSelect(e) {
     const input = /** @type {HTMLInputElement} */ (e.target);
-    if (input.files) await processFiles(input.files);
+    if (input.files) await handleFiles(input.files);
     input.value = '';
   }
 
@@ -128,7 +84,7 @@
   function handleDrop(e) {
     e.preventDefault();
     dragOver = false;
-    if (e.dataTransfer?.files) processFiles(e.dataTransfer.files);
+    if (e.dataTransfer?.files) handleFiles(e.dataTransfer.files);
   }
 
   /** @param {number} index */
@@ -143,12 +99,6 @@
     pendingImages = pendingImages;
   }
 
-  function formatSize(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1048576).toFixed(1)} MB`;
-  }
-
   const hasAttachments = $derived(pendingFiles.length > 0 || pendingImages.length > 0);
 </script>
 
@@ -160,40 +110,7 @@
   ondrop={handleDrop}
   role="region"
 >
-  {#if pendingImages.length > 0}
-    <div class="image-list">
-      {#each pendingImages as img, i}
-        <div class="image-thumb">
-          <img src={img.dataUrl} alt={img.name} />
-          <button class="image-remove" onclick={() => removeImage(i)} aria-label="Remove {img.name}">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-      {/each}
-    </div>
-  {/if}
-
-  {#if pendingFiles.length > 0}
-    <div class="file-list">
-      {#each pendingFiles as file, i}
-        <div class="file-tag">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-          <span class="file-tag-name">{file.name}</span>
-          <span class="file-tag-size">{formatSize(file.size)}</span>
-          <button class="file-remove" onclick={() => removeFile(i)} aria-label="Remove {file.name}">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-      {/each}
-    </div>
-  {/if}
+  <FileAttachments {pendingFiles} {pendingImages} onRemoveFile={removeFile} onRemoveImage={removeImage} />
 
   <form class="input-row" onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
     <button type="button" class="attach-btn" onclick={openFilePicker} aria-label="Attach files" title="Attach files or images">
@@ -254,7 +171,7 @@
   .input-area {
     flex-shrink: 0;
     padding: 16px 24px 12px;
-    max-width: 728px;
+    max-width: 808px;
     margin: 0 auto;
     width: 100%;
     transition: background var(--transition);
@@ -264,88 +181,6 @@
     background: var(--bg-tertiary);
     border-radius: var(--radius-lg);
   }
-
-  .image-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-
-  .image-thumb {
-    position: relative;
-    width: 80px;
-    height: 80px;
-    border-radius: var(--radius);
-    overflow: hidden;
-    border: 1px solid var(--border);
-  }
-
-  .image-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-
-  .image-remove {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: rgba(0, 0, 0, 0.7);
-    color: #fff;
-    border: none;
-    cursor: pointer;
-  }
-  .image-remove:hover { background: var(--error); }
-
-  .file-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 10px;
-  }
-
-  .file-tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 8px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .file-tag-name {
-    font-weight: 500;
-    color: var(--text-primary);
-    max-width: 150px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .file-tag-size { color: var(--text-tertiary); }
-
-  .file-remove {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 3px;
-    color: var(--text-tertiary);
-    margin-left: 2px;
-  }
-  .file-remove:hover { color: var(--error); background: var(--error-bg); }
 
   .input-row {
     display: flex;
@@ -461,5 +296,15 @@
 
   @media (max-width: 768px) {
     .input-area { padding: 12px 16px 10px; }
+  }
+
+  @media (max-width: 320px) {
+    .input-area { padding: 8px 10px 8px; }
+    textarea { font-size: 14px; }
+    .hint { font-size: 11px; }
+  }
+
+  @media (min-width: 1440px) {
+    .input-area { max-width: 868px; }
   }
 </style>

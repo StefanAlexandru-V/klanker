@@ -7,38 +7,49 @@
 
   const chat = createChatStore();
 
-  let sidebarOpen = $state(true);
-  let mobileOverlay = $state(false);
+  const initialMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+  let isMobile = $state(initialMobile);
+  let sidebarOpen = $state(!initialMobile);
+
+  $effect(() => {
+    function onResize() {
+      const nowMobile = window.innerWidth <= 768;
+      if (nowMobile !== isMobile) {
+        isMobile = nowMobile;
+        if (nowMobile) sidebarOpen = false;
+      }
+    }
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  });
 
   function toggleSidebar() {
     sidebarOpen = !sidebarOpen;
-    if (window.innerWidth <= 768) {
-      mobileOverlay = sidebarOpen;
-    }
   }
 
   function closeSidebar() {
-    sidebarOpen = false;
-    mobileOverlay = false;
+    if (isMobile) sidebarOpen = false;
   }
 
   function handleNewChat() {
     chat.newConversation();
-    if (window.innerWidth <= 768) closeSidebar();
+    closeSidebar();
   }
 
   function handleSelect(id) {
     chat.switchConversation(id);
-    if (window.innerWidth <= 768) closeSidebar();
+    closeSidebar();
   }
 </script>
 
-{#if mobileOverlay}
-  <button class="overlay" onclick={closeSidebar} aria-label="Close sidebar"></button>
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+{#if isMobile && sidebarOpen}
+  <button class="overlay" onclick={() => { sidebarOpen = false; }} aria-label="Close sidebar"></button>
 {/if}
 
 <div class="layout">
-  {#if sidebarOpen}
+  <div class="sidebar-rail" class:open={sidebarOpen}>
     <Sidebar
       conversations={chat.filteredConversations}
       activeConvId={chat.activeConvId}
@@ -49,17 +60,21 @@
       onRename={(id, t) => chat.renameConversation(id, t)}
       onClose={toggleSidebar}
     />
-  {/if}
+  </div>
 
-  <main class="main">
+  <main class="main" id="main-content">
     <header>
-      {#if !sidebarOpen}
-        <button class="menu-btn" onclick={toggleSidebar} aria-label="Open sidebar">
+      <button class="menu-btn" onclick={toggleSidebar} aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}>
+        {#if sidebarOpen}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>
+          </svg>
+        {:else}
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
           </svg>
-        </button>
-      {/if}
+        {/if}
+      </button>
 
       <div class="header-center">
         <ModelSelector
@@ -121,6 +136,17 @@
     z-index: 99;
     border: none;
     cursor: default;
+  }
+
+  .sidebar-rail {
+    width: 0;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: width 200ms ease;
+  }
+
+  .sidebar-rail.open {
+    width: 280px;
   }
 
   .main {
@@ -194,5 +220,52 @@
   .dismiss:hover {
     opacity: 1;
     background: rgba(255, 68, 68, 0.1);
+  }
+
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 200;
+    padding: 8px 16px;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 0 0 var(--radius) var(--radius);
+    text-decoration: none;
+  }
+
+  .skip-link:focus {
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  @media (max-width: 768px) {
+    .sidebar-rail {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100%;
+      z-index: 100;
+      width: 0;
+    }
+
+    .sidebar-rail.open {
+      width: 300px;
+    }
+  }
+
+  @media (max-width: 320px) {
+    header {
+      padding: 6px 8px;
+      min-height: 44px;
+      gap: 4px;
+    }
+
+    .menu-btn, .new-btn {
+      width: 32px;
+      height: 32px;
+    }
   }
 </style>
