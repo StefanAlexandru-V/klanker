@@ -20,7 +20,6 @@ vi.mock('../lib/db.js', () => ({
   loadConversations: vi.fn().mockResolvedValue([]),
   saveConversation: vi.fn().mockResolvedValue(undefined),
   deleteConversation: vi.fn().mockResolvedValue(undefined),
-  clearConversations: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { streamChat, fetchModels } from '../lib/api.js';
@@ -290,5 +289,205 @@ describe('store', () => {
     expect(webSearch).not.toHaveBeenCalled();
     expect(store.activeMessages[1].sources).toBeUndefined();
     expect(store.activeMessages[1].content).toBe('just a normal reply');
+  });
+
+  it('preserves reasoning across search rounds', async () => {
+    const searchResults = [
+      { title: 'WoW Guide', url: 'https://example.com/wow', content: 'mythic tips' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'reasoning', text: 'The user wants Mythic+ info.' };
+          yield { type: 'reasoning', text: ' I should search for current data.' };
+          yield { type: 'content', text: '[SEARCH: WoW Mythic+ tips 2026]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Here are the latest Mythic+ tips [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('Mythic+ mostly');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.reasoning).toBe('The user wants Mythic+ info. I should search for current data.');
+    expect(assistant.content).toBe('Here are the latest Mythic+ tips [1].');
+    expect(assistant.content).not.toContain('[SEARCH:');
+    expect(assistant.sources).toHaveLength(1);
+    expect(assistant.searchQuery).toBe('WoW Mythic+ tips 2026');
+  });
+
+  it('does not flash [SEARCH:] text in content during buffered streaming', async () => {
+    webSearch.mockResolvedValue([]);
+
+    const contentSnapshots = [];
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[SE' };
+          yield { type: 'content', text: 'ARCH: some query]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Final answer.' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    const sendPromise = store.send('test search');
+
+    const checkInterval = setInterval(() => {
+      const msgs = store.activeMessages;
+      if (msgs.length > 1) {
+        contentSnapshots.push(msgs[1].content);
+      }
+    }, 1);
+
+    await sendPromise;
+    clearInterval(checkInterval);
+
+    for (const snap of contentSnapshots) {
+      expect(snap).not.toContain('[SEARCH:');
+    }
+    expect(store.activeMessages[1].content).toBe('Final answer.');
+  });
+
+  it('handles multiple search rounds accumulating sources', async () => {
+    const results1 = [{ title: 'R1', url: 'https://a.com', content: 'first' }];
+    const results2 = [{ title: 'R2', url: 'https://b.com', content: 'second' }];
+
+    let searchCount = 0;
+    webSearch.mockImplementation(() => {
+      searchCount++;
+      return Promise.resolve(searchCount === 1 ? results1 : results2);
+    });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[SEARCH: first query]' };
+        })();
+      }
+      if (callCount === 2) {
+        return (async function* () {
+          yield { type: 'content', text: '[SEARCH: second query]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Combined answer [1][2].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('complex question');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.sources).toHaveLength(2);
+    expect(assistant.sources[0].title).toBe('R1');
+    expect(assistant.sources[1].title).toBe('R2');
+    expect(assistant.content).toBe('Combined answer [1][2].');
+    expect(streamChat).toHaveBeenCalledTimes(3);
+  });
+
+  it('handles model dumping reasoning as content tokens before [SEARCH:]', async () => {
+    const searchResults = [
+      { title: 'WoW Guide', url: 'https://wowhead.com', content: 'mythic tips' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: 'Thinking Process:\n1. The user is asking about Mythic+.\n' };
+          yield { type: 'content', text: '2. I need to search for current data.\n' };
+          yield { type: 'content', text: '[SEARCH: WoW Mythic+ tips 2026]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Here are the latest Mythic+ tips [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('What is new with Mythic+?');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Here are the latest Mythic+ tips [1].');
+    expect(assistant.content).not.toContain('[SEARCH:');
+    expect(assistant.content).not.toContain('Thinking Process');
+    expect(assistant.reasoning).toContain('The user is asking about Mythic+');
+    expect(assistant.sources).toHaveLength(1);
+    expect(assistant.searchQuery).toBe('WoW Mythic+ tips 2026');
+    expect(webSearch).toHaveBeenCalledWith('WoW Mythic+ tips 2026');
+  });
+
+  it('handles model reasoning-as-content across multiple search rounds', async () => {
+    let searchCount = 0;
+    webSearch.mockImplementation(() => {
+      searchCount++;
+      return Promise.resolve([
+        { title: `Result ${searchCount}`, url: `https://r${searchCount}.com`, content: 'info' },
+      ]);
+    });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: 'Let me think... I should search.\n[SEARCH: first query]' };
+        })();
+      }
+      if (callCount === 2) {
+        return (async function* () {
+          yield { type: 'content', text: 'Need more info.\n[SEARCH: second query]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Final answer with [1] and [2].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('complex question');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Final answer with [1] and [2].');
+    expect(assistant.reasoning).toContain('Let me think');
+    expect(assistant.reasoning).toContain('Need more info');
+    expect(assistant.sources).toHaveLength(2);
+    expect(streamChat).toHaveBeenCalledTimes(3);
   });
 });
