@@ -1,6 +1,9 @@
 <script>
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
+  import ThinkingBlock from './ThinkingBlock.svelte';
+  import MessageAttachments from './MessageAttachments.svelte';
+  import MessageSources from './MessageSources.svelte';
 
   /**
    * @type {{
@@ -19,8 +22,8 @@
 
   const isUser = $derived(role === 'user');
   const isStreaming = $derived(loading || searching);
-  const isEmpty = $derived(role === 'assistant' && !content && !searching);
-  const showThinking = $derived(reasoning && !isStreaming);
+  const isEmpty = $derived(role === 'assistant' && !content && !searching && !reasoning);
+  const showThinking = $derived(!!reasoning);
 
   marked.setOptions({
     breaks: true,
@@ -28,63 +31,38 @@
     async: false,
   });
 
-  const renderedContent = $derived(
-    !isUser && content ? DOMPurify.sanitize(/** @type {string} */ (marked.parse(content))) : ''
-  );
+  const CITATION_RE = /\[(\d+)\]/g;
 
-  let thinkingOpen = $state(false);
-
-  function formatSize(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1048576).toFixed(1)} MB`;
+  function linkifyCitations(html, srcs) {
+    if (!srcs?.length) return html;
+    return html.replace(CITATION_RE, (match, num) => {
+      const idx = parseInt(num, 10) - 1;
+      const source = srcs[idx];
+      if (!source) return match;
+      const escaped = source.url.replace(/"/g, '&quot;');
+      const title = source.title.replace(/"/g, '&quot;');
+      return `<a class="citation" href="${escaped}" target="_blank" rel="noopener noreferrer" title="${title}">${num}</a>`;
+    });
   }
+
+  const renderedContent = $derived(
+    !isUser && content
+      ? linkifyCitations(
+          DOMPurify.sanitize(/** @type {string} */ (marked.parse(content))),
+          sources,
+        )
+      : ''
+  );
 </script>
 
 <div class="message" class:user={isUser} class:assistant={!isUser}>
   <div class="message-inner">
     <div class="role-label">{isUser ? 'You' : 'Assistant'}</div>
 
-    {#if images?.length}
-      <div class="image-attachments">
-        {#each images as img}
-          <img class="attached-image" src={img.dataUrl} alt={img.name} />
-        {/each}
-      </div>
-    {/if}
-
-    {#if files?.length}
-      <div class="attachments">
-        {#each files as file}
-          <div class="file-chip">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-            </svg>
-            <span class="file-name">{file.name}</span>
-            <span class="file-size">{formatSize(file.size)}</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
+    <MessageAttachments {files} {images} />
 
     {#if showThinking}
-      <div class="thinking-block">
-        <button class="thinking-toggle" onclick={() => { thinkingOpen = !thinkingOpen; }}>
-          <svg class="thinking-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M12 6v6l4 2"/>
-          </svg>
-          <span class="thinking-label">Thought process</span>
-          <svg class="thinking-chevron" class:open={thinkingOpen} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"/>
-          </svg>
-        </button>
-
-        {#if thinkingOpen}
-          <div class="thinking-content">{reasoning}</div>
-        {/if}
-      </div>
+      <ThinkingBlock {reasoning} />
     {/if}
 
     <div class="content">
@@ -106,24 +84,7 @@
       {/if}
     </div>
 
-    {#if sources?.length}
-      <div class="sources">
-        <div class="sources-label">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-          </svg>
-          {sources.length} sources
-        </div>
-        <div class="sources-list">
-          {#each sources as source, i}
-            <a class="source-chip" href={source.url} target="_blank" rel="noopener noreferrer">
-              <span class="source-num">{i + 1}</span>
-              <span class="source-title">{source.title}</span>
-            </a>
-          {/each}
-        </div>
-      </div>
-    {/if}
+    <MessageSources {sources} />
   </div>
 </div>
 
@@ -138,7 +99,7 @@
   }
 
   .message-inner {
-    max-width: 680px;
+    max-width: 760px;
     margin: 0 auto;
     padding: 0 24px;
   }
@@ -160,26 +121,6 @@
   .user .content {
     color: var(--text-secondary);
     white-space: pre-wrap;
-  }
-
-  .image-attachments {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .attached-image {
-    max-width: 300px;
-    max-height: 300px;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    object-fit: contain;
-    cursor: pointer;
-  }
-
-  .attached-image:hover {
-    border-color: var(--border-light);
   }
 
   .content :global(p) {
@@ -228,6 +169,35 @@
 
   .content :global(a:hover) {
     opacity: 0.8;
+  }
+
+  .content :global(a.citation) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    margin: 0 1px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-light);
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    vertical-align: super;
+    font-feature-settings: "tnum";
+    font-family: var(--font-mono);
+    transition: all var(--transition);
+  }
+
+  .content :global(a.citation:hover) {
+    opacity: 1;
+    background: var(--bg-hover);
+    border-color: var(--text-tertiary);
+    color: var(--text-primary);
   }
 
   .content :global(ul),
@@ -325,94 +295,6 @@
     border-radius: var(--radius);
   }
 
-  .attachments {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 10px;
-  }
-
-  .file-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .file-name {
-    font-weight: 500;
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-primary);
-  }
-
-  .file-size {
-    color: var(--text-tertiary);
-  }
-
-  .thinking-block {
-    margin-bottom: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .thinking-toggle {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 8px 12px;
-    font-size: 14px;
-    color: var(--text-secondary);
-    background: var(--bg-tertiary);
-    text-align: left;
-    font-weight: 500;
-  }
-
-  .thinking-toggle:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .thinking-icon {
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-  }
-
-  .thinking-label {
-    flex: 1;
-  }
-
-  .thinking-chevron {
-    flex-shrink: 0;
-    opacity: 0.5;
-    transition: transform var(--transition);
-  }
-
-  .thinking-chevron.open {
-    transform: rotate(180deg);
-  }
-
-  .thinking-content {
-    padding: 14px;
-    font-size: 14px;
-    line-height: 1.65;
-    color: var(--text-tertiary);
-    white-space: pre-wrap;
-    word-break: break-word;
-    border-top: 1px solid var(--border);
-    max-height: 400px;
-    overflow-y: auto;
-  }
-
   .dots {
     display: flex;
     gap: 4px;
@@ -449,74 +331,34 @@
     color: var(--success);
   }
 
-  .sources {
-    margin-top: 16px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-  }
-
-  .sources-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 8px;
-  }
-
-  .sources-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .source-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-secondary);
-    text-decoration: none;
-    transition: all var(--transition);
-    max-width: 250px;
-  }
-
-  .source-chip:hover {
-    border-color: var(--border-light);
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .source-num {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--border-light);
-    color: var(--text-primary);
-    font-size: 10px;
-    font-weight: 700;
-    flex-shrink: 0;
-  }
-
-  .source-title {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   @media (max-width: 768px) {
     .message-inner {
       padding: 0 16px;
+    }
+  }
+
+  @media (max-width: 320px) {
+    .message {
+      padding: 16px 0;
+    }
+
+    .message-inner {
+      padding: 0 10px;
+    }
+
+    .content {
+      font-size: 14px;
+    }
+  }
+
+  @media (min-width: 1440px) {
+    .message-inner {
+      max-width: 820px;
     }
   }
 </style>
