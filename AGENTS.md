@@ -5,16 +5,28 @@
 | Action | Command |
 |--------|---------|
 | Dev server | `npm run dev` |
+| API server (SQLite) | `npm run api` |
+| Both together | `npm run dev:full` |
 | Build | `npm run build` |
-| Run all tests | `npm test` |
+| Run all web tests | `npm test` |
 | Watch tests | `npm run test:watch` |
 | Run single test file | `npx vitest run src/__tests__/api.test.js` |
 | Start SearXNG | `docker start klanker-searxng` |
 | Restart SearXNG | `docker restart klanker-searxng` |
+| Run voice tests (WSL) | `cd klanker-voice && python3 -m pytest tests/ -v` |
+| Voice app (Windows) | `cd klanker-voice && python -m src --debug` |
+| Voice app demo mode | `cd klanker-voice && python -m src --demo --debug` |
 
 ## Architecture
 
-Svelte 5 + Vite chat app that streams responses from an LM Studio OpenAI-compatible API via SSE. Web search via local SearXNG instance (Docker).
+Two applications sharing a SQLite database:
+
+1. **Klanker Web** — Svelte 5 + Vite chat app with SSE streaming, web search, file/image support
+2. **Klanker Voice** — Python voice assistant with wake word, STT, LLM streaming, floating widget
+
+Both talk to the same **LM Studio** instance and **SearXNG** for web search.
+
+### Web App
 
 ```
 src/
@@ -24,7 +36,7 @@ src/
   lib/
     api.js                 # streamChat() async generator — SSE streaming client
     store.svelte.js        # createChatStore() — reactive state via Svelte 5 runes
-    db.js                  # IndexedDB wrapper for conversation persistence
+    db.js                  # HTTP client → SQLite API server (was IndexedDB)
     fileParser.js          # Text extraction from file types (PDF, DOCX, XLSX, etc.)
     fileHandler.js         # File processing pipeline (image/document handling)
     search.js              # Web search integration via SearXNG
@@ -42,12 +54,93 @@ src/
     ModelSelector.svelte   # Model dropdown with keyboard navigation + auto-focus
   __tests__/
     api.test.js            # streamChat tests with mocked fetch/ReadableStream
-    store.test.js          # Store integration tests (35 tests: send, search flow, reasoning, sources)
+    store.test.js          # Store integration tests (35 tests)
+server/
+  api.js                   # Node.js SQLite API server (better-sqlite3) — 8 REST endpoints
 ```
 
-**Data flow:** `Input` → `App.send()` → `store.send()` → `streamChat()` yields tokens → store mutates `$state` → `Chat`/`Message` re-render reactively.
+### Voice App
 
-**Search flow:** Model outputs `[SEARCH: query]` → `store.send()` detects it → calls `webSearch()` (SearXNG via `/search` proxy) → injects results into system prompt → model responds with citations `[1]`, `[2]` → `Message.svelte` renders citations as styled inline badges.
+```
+klanker-voice/
+  src/
+    __init__.py
+    __main__.py            # python -m entry point
+    main.py                # App orchestration, system tray, QThread workers, --demo mode
+    widget.py              # PyQt6 floating overlay — solid dark panel with animated orb
+    db.py                  # Shared SQLite persistence (conversations + messages)
+    llm.py                 # LM Studio streaming client (httpx SSE) with search loop
+    search.py              # SearXNG web search client (Python port of search.js)
+    wake.py                # OpenWakeWord background listener — "Hey Clanker" / Winston / Hey Jarvis
+    transcribe.py          # faster-whisper STT with adaptive silence detection
+  assets/
+    hey_clanker.onnx       # Custom wake word model (trained via Colab)
+    winston.onnx           # Fallback wake word — say "Winston"
+  train/
+    train_on_gpu.bat       # Windows batch script for GPU training on NVIDIA card
+    COLAB_GUIDE.md         # Google Colab training instructions
+    openwakeword-training/ # CoreWorxLab Docker-based trainer (CPU Dockerfile patched)
+  tests/
+    test_db.py             # 15 tests — SQLite CRUD
+    test_llm.py            # 4 tests — SSE streaming, split chunks, system prompt
+    test_main.py           # 5 tests — dismiss phrase detection (EN + RO)
+  requirements.txt
+  pyproject.toml
+  README.md
+```
+
+### Shared SQLite Database
+
+Both apps read/write the same SQLite file:
+- **Windows**: `%APPDATA%\klanker\conversations.db`
+- **Linux/WSL**: `~/.local/share/klanker/conversations.db`
+- Override: `KLANKER_DB_PATH` env var
+
+The web app talks to SQLite via the API server (`server/api.js` on port 3100, proxied via Vite `/api`). The voice app writes directly via Python `sqlite3`.
+
+**Data flow (web):** `Input` → `App.send()` → `store.send()` → `streamChat()` yields tokens → store mutates `$state` → `Chat`/`Message` re-render reactively.
+
+**Data flow (voice):** Wake word → Record audio → Whisper STT → LLM stream (with search loop) → Widget displays response → Auto-listen for follow-up or dismiss.
+
+**Search flow (both):** Model outputs `[SEARCH: query]` → detected in stream → SearXNG query → results injected into system prompt → model re-prompted → streams answer with citations.
+
+## Voice App Details
+
+### Wake Word Priority
+1. `assets/hey_clanker.onnx` — custom trained model, say **"Hey Clanker"**
+2. `assets/winston.onnx` — community model, say **"Winston"**
+3. Built-in `hey_jarvis` — downloaded from OpenWakeWord, say **"Hey Jarvis"**
+
+### Voice Flow
+1. Wake word detected → widget appears (animated orb)
+2. Wake listener STOPS to release mic → 300ms delay
+3. Recording starts → adaptive noise calibration (first 0.5s)
+4. Speech detected → records until 1.5s silence
+5. Whisper tiny (CPU, int8, beam=1) transcribes in ~0.3s
+6. If dismiss phrase ("thanks", "mersi", "mulțumesc") → close widget, resume wake listener
+7. Otherwise → send to LLM with search-capable system prompt
+8. LLM may emit `[SEARCH: query]` → SearXNG search → re-prompt with results
+9. Response streams into widget panel
+10. After response → auto-listen for follow-up (no wake word needed)
+11. If no speech detected → dismiss and resume wake listener
+
+### Widget States
+| State | Orb Color | Animation | Panel |
+|-------|-----------|-----------|-------|
+| LISTENING | Indigo | Audio bars + breathing glow | Hidden |
+| THINKING | Bright indigo | Orbiting arcs + bouncing dots | Hidden |
+| RESPONDING | Green | Gentle pulse | Visible, streaming text |
+| DONE | Green | Checkmark | Visible, hint shown |
+| ERROR | Red | X mark | Visible, error text |
+
+### Key Technical Decisions
+- **Runs on Windows, developed in WSL** — all Python source is cross-platform
+- **PyQt6** for GUI — solid dark panel, no `WA_TranslucentBackground` (causes ghost windows on Windows)
+- **faster-whisper** instead of pywhispercpp — pre-built wheels, no CMake needed
+- **Tiny model + int8 + beam_size=1** — optimized for speed on CPU (9800X3D)
+- **QThread + Qt signals** for all cross-thread communication — no `QTimer.singleShot` from bg threads
+- **httpx** async SSE streaming with proper `break` instead of `return` to avoid dangling coroutines
+- **Adaptive silence detection** — calibrates noise floor from first 0.5s, threshold = max(3x noise, 0.005)
 
 ## Key Conventions
 
@@ -59,6 +152,7 @@ src/
 - **Linear design system** — muted, semi-transparent surfaces. No loud accent fills on inline elements. Use `--bg-tertiary` + `--border-light` for badges/chips, not `--accent`.
 - Components target < 200 lines each.
 - All API logic isolated in `src/lib/api.js`; components never call `fetch` directly.
+- **Python voice app** — plain Python, no type stubs, Roboto font, Pytest for tests.
 
 ## Services
 
@@ -66,11 +160,13 @@ src/
 |---------|-----|--------|
 | LM Studio API | `http://10.3.58.20:1234/v1` | Proxied via Vite `/v1` |
 | SearXNG | `http://localhost:8888` | Docker `klanker-searxng`, proxied via Vite `/search` |
+| SQLite API | `http://localhost:3100` | `server/api.js`, proxied via Vite `/api` |
 
 SearXNG config is volume-mounted from `./searxng/settings.yml`. The `formats` list MUST include `json` — without it, the `/search?format=json` endpoint returns 403.
 
 ## Environment Variables
 
+### Web App
 Configured in `.env`, prefixed with `VITE_` for client-side access:
 
 | Variable | Default | Purpose |
@@ -79,12 +175,26 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 | `VITE_MODEL_ID` | `qwen/qwen2.5-coder-14b` | Model identifier |
 | `VITE_SYSTEM_PROMPT` | `You are a helpful assistant.` | System prompt prepended to all requests |
 
+### Voice App
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `KLANKER_API_BASE` | `http://10.3.58.20:1234/v1` | LM Studio API URL |
+| `KLANKER_DB_PATH` | Platform-specific (see above) | SQLite database path |
+| `KLANKER_SEARCH_URL` | `http://localhost:8888/search` | SearXNG endpoint |
+
 ## Testing
 
-- **Vitest** with node environment — no DOM/browser needed for current tests.
+### Web (Vitest)
 - `api.test.js` mocks `fetch` with `vi.stubGlobal` and constructs `ReadableStream` to simulate SSE chunks.
 - `store.test.js` mocks `../lib/api.js` module to isolate store logic from network. Includes search flow tests covering reasoning-as-content, multi-round search, source dedup, and buffered streaming.
 - Svelte plugin processes `.svelte.js` files during test runs, so runes work in tests.
+
+### Voice (Pytest)
+- `test_db.py` — 15 tests: SQLite CRUD for conversations and messages, JSON fields, cascading deletes.
+- `test_llm.py` — 4 tests: SSE streaming with mocked httpx, split chunks, system prompt injection.
+- `test_main.py` — 5 tests: dismiss phrase detection in English and Romanian.
+- No PyQt6 needed for tests — all testable logic is isolated from GUI.
 
 ## Gotchas
 
@@ -94,7 +204,19 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 - The store sends the full conversation history (including system prompt) on every request — there is no server-side session.
 - **Search buffering**: `streamResponse` buffers content when `bufferForSearch: true` to detect `[SEARCH:]` directives before writing to reactive state. Some models (Qwen) dump reasoning as content tokens — the search loop extracts text before `[SEARCH:]` and moves it to `msg.reasoning`.
 - **SearXNG JSON format**: Must be enabled in `searxng/settings.yml` under `search.formats`. Without it, all JSON API calls return 403.
-- **System prompt is in `store.svelte.js`**: The `SYSTEM_PROMPT` constant contains vision, search, and behavior instructions. When tuning model behavior, edit it there. The prompt tells the model it CAN see images and CAN search for anything (links, resources, galleries, etc.).
+- **System prompt is in `store.svelte.js`** (web) and `llm.py` (voice): Both contain vision, search, and behavior instructions. Keep them in sync when tuning model behavior.
+- **Voice: wake listener must stop before recording** — both use the same mic. The 300ms delay after stopping ensures the device is released.
+- **Voice: `WA_TranslucentBackground` breaks on Windows** — causes ghost window artifacts. Use solid dark background with `border-radius` instead.
+- **Voice: `QTimer.singleShot` from background threads is unreliable on Windows** — always use QThread + Qt signals for cross-thread communication.
+- **Voice: httpx async generators must use `break` not `return`** — `return` inside `async for` abandons the stream without cleanup, causing "Task was destroyed" warnings.
+- **Voice: Python 3.14 is too new** — `faster-whisper` and other deps don't have wheels. Use Python 3.12 on Windows.
+- **Web app db.js was migrated from IndexedDB to HTTP API** — now calls `server/api.js` REST endpoints. The `idb` package is still in deps but unused.
+
+## Pending / TODO
+
+- **Web app SQLite migration untested end-to-end** — `server/api.js` and new `db.js` are written but the web app hasn't been tested with the API server yet. Need to run `npm run dev:full` and verify conversations load/save.
+- **Remove `idb` dependency** from package.json once SQLite migration is confirmed working.
+- **Wake word training** — `hey_clanker.onnx` was trained via Google Colab. For re-training or improvements, use `train/train_on_gpu.bat` on an NVIDIA GPU machine, or the Docker trainer in `train/openwakeword-training/`.
 
 ## Dev Server
 
@@ -102,6 +224,11 @@ Always keep the dev server running with hot reload during development:
 
 ```bash
 npm run dev
+```
+
+For full stack with SQLite API:
+```bash
+npm run dev:full
 ```
 
 Vite HMR auto-updates the browser on file changes. If the port is occupied, kill the old process first:
@@ -112,7 +239,7 @@ kill $(lsof -ti :5173) 2>/dev/null; npm run dev
 
 ## MemPalace — Persistent Memory
 
-This project has a MemPalace wing named **klanker** (275 drawers across rooms: src, general, searxng).
+This project has a MemPalace wing named **klanker** (275+ drawers across rooms: src, general, searxng, voice).
 
 ### On Session Start
 
@@ -135,6 +262,7 @@ This project has a MemPalace wing named **klanker** (275 drawers across rooms: s
 | `src` | Source code fragments, store logic, API layer, components |
 | `general` | Config, docs, specs, project-level files |
 | `searxng` | SearXNG search engine configuration |
+| `voice` | Voice assistant decisions, wake word, STT, widget |
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
