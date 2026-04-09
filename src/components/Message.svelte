@@ -25,7 +25,7 @@
   const isUser = $derived(role === 'user');
   const isStreaming = $derived(loading || searching);
   const isEmpty = $derived(role === 'assistant' && !content && !searching && !reasoning);
-  const showThinking = $derived(!!reasoning);
+  const showThinking = $derived(!!reasoning?.trim());
   const showToolCalls = $derived(toolCalls?.length > 0 && toolCalls.some((tc) => tc.tool !== 'search'));
 
   marked.setOptions({
@@ -50,9 +50,12 @@
 
   const renderedContent = $derived(
     !isUser && content
-      ? linkifyCitations(
-          DOMPurify.sanitize(/** @type {string} */ (marked.parse(content))),
-          sources,
+      ? DOMPurify.sanitize(
+          linkifyCitations(
+            /** @type {string} */ (marked.parse(content)),
+            sources,
+          ),
+          { ADD_ATTR: ['target'] },
         )
       : ''
   );

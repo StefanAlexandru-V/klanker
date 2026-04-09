@@ -16,6 +16,10 @@
 | Run voice tests (WSL) | `cd klanker-voice && python3 -m pytest tests/ -v` |
 | Voice app (Windows) | `cd klanker-voice && python -m src --debug` |
 | Voice app demo mode | `cd klanker-voice && python -m src --demo --debug` |
+| Prompt tests (all models) | `npm run test:prompts` |
+| Prompt tests (verbose) | `npm run test:prompts:verbose` |
+| Prompt tests (one model) | `node server/prompt-tests/runner.js --model 'google/gemma-4-26b-a4b'` |
+| Prompt tests (filter) | `node server/prompt-tests/runner.js --filter 'test name pattern'` |
 
 ## Architecture
 
@@ -66,6 +70,13 @@ server/
     shell.js               # Shell executor with timeout + truncation
     readFile.js            # File reader with path validation + binary detection
     __tests__/             # 56 server-side unit tests (classify, shell, readFile)
+  prompt-tests/
+    runner.js              # Prompt test runner — sends real convos through LLM + tools
+    prompt-utils.js        # Shared buildToolPrompt (mirrors src/lib/tools.js)
+    cases/
+      tool-usage.js        # 6 tests: path accuracy, cwd, recovery, file reading
+      response-quality.js  # 7 tests: conciseness, opinions, tone, formatting
+      error-recovery.js    # 4 tests: error handling, hallucination, path adaptation
 ```
 
 ### Voice App
@@ -206,6 +217,15 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 - `test_main.py` — 5 tests: dismiss phrase detection in English and Romanian.
 - No PyQt6 needed for tests — all testable logic is isolated from GUI.
 
+### Prompt Tests (LLM Integration)
+- Sends real multi-turn conversations through LM Studio + tool API server, evaluates responses with assertion functions.
+- Requires both LM Studio and the API server (`npm run api`) to be running.
+- `tool-usage.js` — 6 tests: verifies model uses exact paths from tool output, uses `cwd` param, recovers from wrong paths, doesn't fabricate names.
+- `response-quality.js` — 7 tests: conciseness, opinions, no flattery, markdown for technical content, plain prose for casual, tone matching, no unnecessary tool calls.
+- `error-recovery.js` — 4 tests: handles missing commands, no hallucination after errors, adapts paths, uses tool output verbatim for numbers.
+- Use `--model` to target a specific model, `--filter` to run a subset, `--verbose` for detailed output.
+- Reports saved to `raw_logs/` as JSON.
+
 ## Gotchas
 
 - The store file **must** be `.svelte.js` (not `.js`) — `$state` and other runes are compile-time transforms that only activate for `.svelte` and `.svelte.js` files.
@@ -222,6 +242,12 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 - **Voice: Python 3.14 is too new** — `faster-whisper` and other deps don't have wheels. Use Python 3.12 on Windows.
 - **Web app db.js was migrated from IndexedDB to HTTP API** — now calls `server/api.js` REST endpoints. The `idb` package has been removed.
 - **Tool framework classifier order matters** — the `||` chain check must run before the `|` pipe check in `classify.js`, otherwise `||` gets split on single `|` and produces empty segments.
+- **Shell classifier doesn't catch backticks or `$()`** — the classifier splits on `&&`, `;`, `||`, `|` but does NOT handle shell metacharacters like backticks, `$()` subshells, or newlines. The approval flow is the safety net for dangerous commands.
+- **`npm outdated` exits 1 on success** — shell.js now treats non-zero exits as success when stdout has content. Same applies to `grep`, `diff`, and other standard tools.
+- **DOMPurify must be the LAST step** — `linkifyCitations` injects `<a>` tags, so DOMPurify.sanitize must run after citation injection, with `ADD_ATTR: ['target']` to preserve `target="_blank"`.
+- **Path validation must use `HOME + '/'`** — `startsWith(HOME)` without trailing `/` allows prefix collisions (e.g., `/home/ska` matching `/home/skadaa`). Both shell.js and readFile.js check `normalized === HOME || normalized.startsWith(HOME + '/')`.
+- **System prompt + tool prompt are built at startup** — `loadToolsAndPrompt()` fetches `/api/tools` once and builds the full system prompt. The prompt includes critical instructions about exact path usage, `cwd` param, and error recovery.
+- **loadConversations does N+1 fetches** — fetches the list, then one request per conversation for messages. Known performance issue for large histories; acceptable for personal use.
 
 ## Pending / TODO
 

@@ -49,7 +49,7 @@ function resolveSafePath(p) {
   const resolved = resolve(expanded);
   const normalized = normalize(resolved);
 
-  if (!normalized.startsWith(HOME)) {
+  if (normalized !== HOME && !normalized.startsWith(HOME + '/')) {
     return { ok: false, resolved: normalized, error: `Path must be under home directory (${HOME})` };
   }
   return { ok: true, resolved: normalized };
@@ -133,6 +133,20 @@ export async function executeShell(params) {
           });
         }
 
+        // Some commands (e.g. npm outdated, grep, diff) use non-zero exit codes
+        // to signal "results found" rather than actual failure.
+        // If stdout has content, treat it as a successful run with a warning.
+        if (output && output.trim()) {
+          return resolvePromise({
+            ok: true,
+            output,
+            truncated,
+            duration,
+            classification,
+            exitCode: error.code,
+          });
+        }
+
         return resolvePromise({
           ok: false,
           error: error.message,
@@ -150,6 +164,7 @@ export async function executeShell(params) {
         truncated,
         duration,
         classification,
+        cwd: resolvedCwd,
       });
     });
   });

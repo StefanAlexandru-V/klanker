@@ -27,7 +27,7 @@ const SAFE_COMMANDS = new Set([
   'sort', 'uniq', 'cut', 'tr', 'diff', 'comm',
   'less', 'more',
   'hostname', 'uname', 'arch', 'id', 'groups', 'who', 'w',
-  'sha256sum', 'md5sum', 'wc', 'nl', 'tac', 'rev',
+  'sha256sum', 'md5sum', 'nl', 'tac', 'rev',
   'tree', 'column', 'jq', 'yq',
 ]);
 

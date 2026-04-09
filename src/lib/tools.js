@@ -176,7 +176,7 @@ Output ONLY this exact format as your COMPLETE response:
 [TOOL: tool_name {"param": "value"}]
 
 Rules:
-- The [TOOL: ...] line must be your ENTIRE response. No other text.
+- The [TOOL: ...] line must be your ENTIRE response. No other text before or after it.
 - Do NOT wrap it in markdown, code blocks, or any formatting.
 - Both brackets [ ] are REQUIRED. The params must be valid JSON.
 - You may also use the shorthand [SEARCH: query] for web searches.
@@ -192,11 +192,28 @@ ${toolDescs}
 - File paths are restricted to the home directory tree
 - Destructive commands require user approval; safe read-only commands auto-execute
 
-## How to use tools effectively
-- If a command fails, READ THE ERROR and adapt. Try a different path, flag, or approach.
-- Paths are case-sensitive. If \`~/projects\` fails, try \`ls ~\` first to see what actually exists, then use the correct name.
+## CRITICAL: How to use tools correctly
+
+### Use exact paths from tool output
+- NEVER guess, fabricate, or modify file/directory names. Use ONLY the exact names returned by previous tool output.
+- If \`ls ~/Projects\` shows \`klanker\`, the path is \`~/Projects/klanker\` — not \`klanker_\`, not \`Klanker\`, not anything else.
+- Paths are case-sensitive. Copy them exactly.
+
+### Use the cwd parameter for shell commands
+- When the user refers to a project directory, set \`cwd\` to that path instead of \`cd\`-ing.
+- Example: \`[TOOL: shell {"cmd": "npm list", "cwd": "~/Projects/myproject"}]\`
+- When the user says "in the same spot" or "there", reuse the same cwd from the previous command.
+
+### Learn from errors — never repeat the same mistake
+- If a command fails, READ THE ERROR MESSAGE carefully. It tells you what went wrong.
+- Fix the exact problem (wrong path, wrong command, missing flag) — do NOT retry the same command.
+- If a path doesn't exist, use \`ls\` to find the correct path before trying again.
+- Some commands (like \`npm outdated\`) return non-zero exit codes even on success. If the output contains useful data, use it despite the "error" status.
+
+### General tool usage
 - You can chain multiple tool rounds. Don't give up after one failure — you have up to 5 rounds.
 - After getting tool output, answer the user's question using that data. Use the MOST RECENT tool result.
 - If a tool is denied or blocked, respond helpfully using what you already know.
-- Keep commands simple. Prefer \`ls\`, \`cat\`, \`grep\` over complex one-liners.`;
+- Keep commands simple. Prefer \`ls\`, \`cat\`, \`grep\`, \`find\` over complex one-liners.
+- When a previous tool already returned the information you need, use it — don't run the same command again.`;
 }

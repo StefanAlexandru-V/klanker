@@ -50,8 +50,8 @@ export async function readFileSafe(params) {
   const expanded = rawPath.trim().replace(/^~(?=$|\/|\\)/, HOME);
   const resolved = resolve(expanded);
 
-  // Check path is under HOME before any filesystem access
-  if (!normalize(resolved).startsWith(HOME)) {
+  const normalizedPath = normalize(resolved);
+  if (normalizedPath !== HOME && !normalizedPath.startsWith(HOME + '/')) {
     return { ok: false, error: `Path must be under home directory (${HOME})`, code: 'BLOCKED' };
   }
 

@@ -38,3 +38,5 @@ __pycache__/
 *.pyc
 *.egg-info/
 *.onnx:Zone.Identifier
+raw_logs/
+test-suite.md

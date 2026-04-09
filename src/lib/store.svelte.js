@@ -24,6 +24,7 @@ Your training data has a knowledge cutoff around early 2024. You may not have ac
 - Never open with flattery ("Great question!", "That's an excellent point!"). Respond directly.
 - If you cannot help with something, say so briefly without lecturing or moralizing.
 - Ask at most one clarifying question per response, and only when genuinely needed.
+- Have opinions. You are allowed to share your perspective on subjective topics. Don't hide behind "as an AI" disclaimers.
 
 # Vision
 - You CAN see and analyze images that users attach. Describe them directly.
@@ -35,6 +36,8 @@ Your training data has a knowledge cutoff around early 2024. You may not have ac
 - For anything that may have changed after your knowledge cutoff (news, prices, people in office, software versions, events), use your tools.
 - When you use information from search results, cite sources with [1], [2], etc.
 - Never fabricate URLs, citations, statistics, or quotes.
+- NEVER invent file names, paths, or directory names. Use ONLY exact names from tool output.
+- If a command fails, READ the error message carefully and fix the exact problem. Do not guess or repeat the same mistake.
 
 # Formatting
 - Use plain prose for conversational replies. No bullet lists or markdown in casual chat.
@@ -347,6 +350,11 @@ export function createChatStore() {
       fullText = stripThinking(fullText, msg);
     }
 
+    // Clean up empty reasoning that results from empty think blocks
+    if (msg.reasoning !== undefined && !msg.reasoning.trim()) {
+      msg.reasoning = '';
+    }
+
     return fullText;
   }
 
@@ -453,11 +461,14 @@ export function createChatStore() {
         tc.status = 'completed';
         tc.output = result.content || result.output || '';
         const truncNote = result.truncated ? '\n(output truncated)' : '';
-        return { contextAddition: `Tool "${tc.tool}" output:\n${tc.output}${truncNote}` };
+        const cwdNote = result.cwd ? `\n(working directory: ${result.cwd})` : '';
+        return { contextAddition: `Tool "${tc.tool}" output:\n${tc.output}${truncNote}${cwdNote}` };
       } else {
         tc.status = 'failed';
         tc.error = result.error;
-        return { contextAddition: `Tool "${tc.tool}" failed: ${result.error}` };
+        // Include any output even on failure — some commands produce useful output with non-zero exit
+        const partialOutput = result.output ? `\nPartial output:\n${result.output}` : '';
+        return { contextAddition: `Tool "${tc.tool}" failed: ${result.error}${partialOutput}` };
       }
     } catch (err) {
       tc.status = 'failed';
@@ -693,6 +704,90 @@ export function createChatStore() {
   }
 
   /**
+   * Export the active conversation as a raw Markdown log.
+   * Includes all reasoning, tool calls, outputs, errors, sources.
+   * @returns {string}
+   */
+  function exportRawLog() {
+    const conv = getActiveConversation();
+    if (!conv) return '';
+
+    const lines = [];
+    lines.push(`# ${conv.title}`);
+    lines.push(`> Exported ${new Date().toISOString()}`);
+    lines.push('');
+
+    for (const msg of conv.messages) {
+      const label = msg.role === 'user' ? '## You' : '## Assistant';
+      lines.push(label);
+      lines.push('');
+
+      if (msg.reasoning) {
+        lines.push('<details><summary>Thought process</summary>');
+        lines.push('');
+        lines.push(msg.reasoning);
+        lines.push('');
+        lines.push('</details>');
+        lines.push('');
+      }
+
+      if (msg.toolCalls?.length) {
+        for (const tc of msg.toolCalls) {
+          if (tc.tool === 'search') {
+            lines.push(`**search** \`${tc.params.query}\``);
+          } else {
+            const paramStr = tc.tool === 'shell' ? tc.params.cmd
+              : tc.tool === 'read_file' ? tc.params.path
+              : JSON.stringify(tc.params);
+            lines.push(`**${tc.tool}** \`${paramStr}\``);
+          }
+          lines.push(`Status: ${tc.status}${tc.duration ? ` (${tc.duration}ms)` : ''}`);
+          if (tc.output) {
+            lines.push('');
+            lines.push('```');
+            lines.push(tc.output);
+            lines.push('```');
+          }
+          if (tc.error) {
+            lines.push('');
+            lines.push(`> Error: ${tc.error}`);
+          }
+          lines.push('');
+        }
+      }
+
+      if (msg.searchQuery) {
+        lines.push(`*Search query: ${msg.searchQuery}*`);
+        lines.push('');
+      }
+
+      if (msg.files?.length) {
+        lines.push(`*Attachments: ${msg.files.map((f) => f.name).join(', ')}*`);
+        lines.push('');
+      }
+
+      if (msg.content) {
+        lines.push(msg.content);
+        lines.push('');
+      }
+
+      if (msg.sources?.length) {
+        lines.push('**Sources:**');
+        for (let i = 0; i < msg.sources.length; i++) {
+          const s = msg.sources[i];
+          lines.push(`[${i + 1}] [${s.title}](${s.url})`);
+        }
+        lines.push('');
+      }
+
+      lines.push('---');
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
    * @returns {Conversation[]}
    */
   function getFilteredConversations() {
@@ -732,5 +827,6 @@ export function createChatStore() {
     renameConversation,
     dismissError,
     resolveToolApproval,
+    exportRawLog,
   };
 }

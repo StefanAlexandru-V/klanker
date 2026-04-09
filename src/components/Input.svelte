@@ -125,6 +125,7 @@
       onkeydown={handleKeydown}
       oninput={autoResize}
       placeholder="Message Klanker..."
+      aria-label="Message input"
       rows="1"
       disabled={disabled && !loading}
     ></textarea>

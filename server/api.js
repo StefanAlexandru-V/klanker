@@ -20,7 +20,7 @@
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { listTools, executeTool } from './tools/registry.js';
 
@@ -88,10 +88,21 @@ function json(res, data, status = 200) {
   res.end(JSON.stringify(data));
 }
 
+const MAX_BODY_SIZE = 2 * 1024 * 1024; // 2MB
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try { resolve(body ? JSON.parse(body) : {}); }
       catch (e) { reject(e); }
@@ -241,6 +252,22 @@ async function handleRequest(req, res) {
         parseInt(msgUpdateMatch[1], 10),
       );
       return json(res, { ok: true });
+    }
+
+    // POST /api/export — save raw log to raw_logs/ directory
+    if (method === 'POST' && path === '/api/export') {
+      const body = await parseBody(req);
+      const { filename, content } = body;
+      if (!filename || !content) {
+        return json(res, { ok: false, error: 'Missing filename or content' }, 400);
+      }
+      const safe = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
+      const dir = join(process.cwd(), 'raw_logs');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const filePath = join(dir, safe);
+      writeFileSync(filePath, content, 'utf-8');
+      console.log(`[api-server] Exported log: ${filePath}`);
+      return json(res, { ok: true, path: filePath });
     }
 
     json(res, { error: 'Not found' }, 404);

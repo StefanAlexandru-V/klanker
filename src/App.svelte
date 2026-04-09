@@ -36,6 +36,35 @@
     closeSidebar();
   }
 
+  async function handleExport() {
+    const md = chat.exportRawLog();
+    if (!md) return;
+    const title = chat.activeConversation?.title || 'conversation';
+    const slug = title.replace(/[^a-zA-Z0-9-_ ]/g, '').trim().replace(/\s+/g, '-');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `${ts}_${slug}.md`;
+
+    try {
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, content: md }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        console.log(`Log exported: ${data.path}`);
+      }
+    } catch {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  }
+
   function handleSelect(id) {
     chat.switchConversation(id);
     closeSidebar();
@@ -86,6 +115,12 @@
         />
       </div>
 
+      <button class="export-btn" onclick={handleExport} aria-label="Export conversation log" title="Export log">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+      </button>
+
       <button class="new-btn" onclick={handleNewChat} aria-label="New chat" title="New chat">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 20h9"/>
@@ -95,7 +130,7 @@
     </header>
 
     {#if chat.error}
-      <div class="error-bar">
+      <div class="error-bar" role="alert">
         <div class="error-content">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
@@ -179,7 +214,7 @@
     justify-content: center;
   }
 
-  .menu-btn, .new-btn {
+  .menu-btn, .new-btn, .export-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -190,7 +225,7 @@
     flex-shrink: 0;
   }
 
-  .menu-btn:hover, .new-btn:hover {
+  .menu-btn:hover, .new-btn:hover, .export-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
@@ -269,7 +304,7 @@
       gap: 4px;
     }
 
-    .menu-btn, .new-btn {
+    .menu-btn, .new-btn, .export-btn {
       width: 32px;
       height: 32px;
     }

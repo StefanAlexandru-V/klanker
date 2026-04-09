@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.5.0] — 2026-04-09
+
+### Added — Prompt Test Suite
+- Automated LLM behaviour testing framework at `server/prompt-tests/` — sends real multi-turn conversations through LM Studio + tool API, evaluates responses with assertion functions.
+- 17 tests across 3 suites: `tool-usage.js` (6), `response-quality.js` (7), `error-recovery.js` (4).
+- Tests cover: exact path usage from tool output, `cwd` param, cwd memory across turns, path recovery, no hallucinated names, conciseness, opinions, tone matching, no flattery, markdown formatting, error recovery, verbatim numbers.
+- Assertion helpers: `assertContains`, `assertNotContains`, `assertToolUsed`, `assertToolParam`, `assertMatches`, `assertNoHallucination`, `assertResponseLength`.
+- `npm run test:prompts` / `npm run test:prompts:verbose` scripts. `--model` and `--filter` flags.
+- Reports saved to `raw_logs/` as JSON.
+
+### Added — Export Raw Log
+- Export button in header — downloads conversation as Markdown with full reasoning, tool calls, outputs, errors, sources.
+- Server-side `POST /api/export` endpoint saves to `raw_logs/` directory. Falls back to browser download on server error.
+
+### Fixed — Model Behaviour (System Prompt)
+- **Model fabricating directory names** — system prompt now says "NEVER invent file names, paths, or directory names. Use ONLY exact names from tool output."
+- **Model not using `cwd` parameter** — tool prompt now explicitly teaches `cwd` usage with examples, including "same spot" / "there" reuse.
+- **Model repeating same failed commands** — tool prompt has dedicated "Learn from errors" section.
+- **"As an AI" disclaimers** — system prompt now says "Have opinions. Don't hide behind 'as an AI' disclaimers."
+- **`npm outdated` false failure** — shell.js now treats non-zero exits as success when stdout has content (covers `npm outdated`, `grep`, `diff`).
+- **Tool results missing context** — shell results now include `cwd` field, tool result injection appends "(working directory: /path)".
+- **Failed tool results missing output** — partial output from failed tools now included in context addition.
+- **Empty thinking blocks** — `streamResponse` clears empty reasoning; `Message.svelte` checks `reasoning?.trim()`.
+
+### Fixed — Conversations Not Loading
+- `loadConversations` now fetches each conversation individually via `GET /api/conversations/:id` (which includes messages) instead of relying on the list endpoint that only returns metadata.
+
+### Fixed — Security
+- **Path traversal via HOME prefix** — `startsWith(HOME)` replaced with `normalized === HOME || normalized.startsWith(HOME + '/')` in both `shell.js` and `readFile.js`. Prevents prefix collision attacks.
+- **XSS via citation injection** — `linkifyCitations` now runs before `DOMPurify.sanitize()` (not after), so injected `<a>` tags are sanitized. Added `ADD_ATTR: ['target']` to preserve `target="_blank"`.
+- **Request body size limit** — API server now rejects request bodies over 2MB.
+
+### Fixed — Quality
+- Duplicate `'wc'` entry in `classify.js` `SAFE_COMMANDS` set.
+- `search_query`/`searchQuery` field name mismatch in `db.js` PUT body — normalized to `searchQuery`.
+- Removed unused `basename` and `homedir` imports from prompt test runner.
+- Added `aria-label="Message input"` to textarea.
+- Added `role="alert"` to error notification bar.
+
+## [0.4.0] — 2026-04-09
+
+### Added — LLM Tool Framework
+- 3-tier command classification: safe (auto-execute), approval (user prompt), blocked (rejected).
+- Server tools: `shell.js` (command executor with timeout + truncation), `readFile.js` (path validation + binary detection), `classify.js` (command classifier), `registry.js` (tool definitions).
+- Client tool loop in `store.svelte.js` — parses `[TOOL: name {params}]` directives, handles approval flow, up to 5 rounds per message.
+- `ToolCall.svelte` — tool call status display with approve/deny buttons, collapsible output.
+- `tools.js` — client-side parser for `[TOOL:]` and `[SEARCH:]` directives, `fetchTools()` API client, `buildToolPrompt()` system prompt builder.
+- Session allowlist for approved command patterns (shell command prefixes, read_file directories).
+- Dynamic system prompt from `/api/tools` endpoint.
+- Backwards-compatible: `[SEARCH: query]` → `[TOOL: search {"query": "..."}]` internally.
+- 56 server-side unit tests (classify, shell, readFile) + 23 client-side tool tests + expanded store tests (28 total).
+
 ## [0.3.0] — 2026-04-07
 
 ### Fixed — UI Layout

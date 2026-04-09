@@ -18,7 +18,16 @@ export async function loadConversations() {
   const res = await fetch(`${API_BASE}/conversations`);
   if (!res.ok) throw new Error(`Failed to load conversations: ${res.status}`);
   const convs = await res.json();
-  return convs.map(normalizeConversation);
+
+  const full = await Promise.all(
+    convs.map(async (c) => {
+      const r = await fetch(`${API_BASE}/conversations/${c.id}`);
+      if (!r.ok) return { ...c, messages: [] };
+      return r.json();
+    })
+  );
+
+  return full.map(normalizeConversation);
 }
 
 /**
@@ -45,7 +54,7 @@ export async function saveConversation(conversation) {
             content: msg.content,
             reasoning: msg.reasoning || '',
             sources: msg.sources || [],
-            search_query: msg.searchQuery || '',
+            searchQuery: msg.searchQuery || '',
             tool_calls: msg.toolCalls || [],
           }),
         });

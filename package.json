@@ -10,7 +10,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:prompts": "node server/prompt-tests/runner.js",
+    "test:prompts:verbose": "node server/prompt-tests/runner.js --verbose"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
