@@ -4,6 +4,7 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import MessageAttachments from './MessageAttachments.svelte';
   import MessageSources from './MessageSources.svelte';
+  import ToolCall from './ToolCall.svelte';
 
   /**
    * @type {{
@@ -14,16 +15,18 @@
    *   images?: Array<{name: string, dataUrl: string}>,
    *   sources?: Array<{title: string, url: string}>,
    *   searchQuery?: string,
+   *   toolCalls?: Array<object>,
    *   loading?: boolean,
    *   searching?: boolean,
    * }}
    */
-  let { role, content, reasoning, files, images, sources, searchQuery, loading = false, searching = false } = $props();
+  let { role, content, reasoning, files, images, sources, searchQuery, toolCalls, loading = false, searching = false, onapprove, ondeny } = $props();
 
   const isUser = $derived(role === 'user');
   const isStreaming = $derived(loading || searching);
   const isEmpty = $derived(role === 'assistant' && !content && !searching && !reasoning);
   const showThinking = $derived(!!reasoning);
+  const showToolCalls = $derived(toolCalls?.length > 0 && toolCalls.some((tc) => tc.tool !== 'search'));
 
   marked.setOptions({
     breaks: true,
@@ -63,6 +66,16 @@
 
     {#if showThinking}
       <ThinkingBlock {reasoning} />
+    {/if}
+
+    {#if showToolCalls}
+      {#each toolCalls.filter((tc) => tc.tool !== 'search') as tc (tc.id)}
+        <ToolCall
+          toolCall={tc}
+          onapprove={(forSession) => onapprove?.(forSession)}
+          ondeny={() => ondeny?.()}
+        />
+      {/each}
     {/if}
 
     <div class="content">

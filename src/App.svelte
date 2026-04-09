@@ -112,7 +112,13 @@
       </div>
     {/if}
 
-    <Chat messages={chat.activeMessages} loading={chat.loading} searching={chat.searching} />
+    <Chat
+      messages={chat.activeMessages}
+      loading={chat.loading}
+      searching={chat.searching}
+      onapprove={(forSession) => chat.resolveToolApproval(true, forSession)}
+      ondeny={() => chat.resolveToolApproval(false)}
+    />
     <Input
       onSend={(msg, files, images) => chat.send(msg, files, images)}
       disabled={!chat.selectedModel}

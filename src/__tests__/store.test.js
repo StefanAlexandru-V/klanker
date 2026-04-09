@@ -22,9 +22,42 @@ vi.mock('../lib/db.js', () => ({
   deleteConversation: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../lib/tools.js', () => ({
+  parseTool: vi.fn((text) => {
+    if (!text) return null;
+    const trimmed = text.trim();
+    const toolMatch = trimmed.match(/\[TOOL:\s*(\w+)\s+(\{.*?\})\]/s);
+    if (toolMatch) {
+      try { return { tool: toolMatch[1], params: JSON.parse(toolMatch[2]) }; } catch {}
+    }
+    const toolIncomplete = trimmed.match(/\[TOOL:\s*(\w+)\s+(\{.*?)$/s);
+    if (toolIncomplete) {
+      try { return { tool: toolIncomplete[1], params: JSON.parse(toolIncomplete[2] + '}') }; } catch {}
+    }
+    const searchMatch = trimmed.match(/\[SEARCH:\s*(.+?)\]/);
+    if (searchMatch) return { tool: 'search', params: { query: searchMatch[1].trim() } };
+    const searchIncomplete = trimmed.match(/\[SEARCH:\s*(.+?)\s*$/);
+    if (searchIncomplete) return { tool: 'search', params: { query: searchIncomplete[1].trim() } };
+    return null;
+  }),
+  hasIncompleteDirective: vi.fn((text) => {
+    if (!text) return false;
+    const trimmed = text.trim();
+    const toolIdx = trimmed.lastIndexOf('[TOOL:');
+    if (toolIdx !== -1 && !trimmed.slice(toolIdx).includes(']')) return true;
+    const searchIdx = trimmed.lastIndexOf('[SEARCH:');
+    if (searchIdx !== -1 && !trimmed.slice(searchIdx).includes(']')) return true;
+    return false;
+  }),
+  fetchTools: vi.fn().mockResolvedValue([]),
+  executeTool: vi.fn().mockResolvedValue({ ok: true, output: '' }),
+  buildToolPrompt: vi.fn(() => ''),
+}));
+
 import { streamChat, fetchModels } from '../lib/api.js';
 import { webSearch } from '../lib/search.js';
 import * as dbMock from '../lib/db.js';
+import { executeTool as executeToolMock } from '../lib/tools.js';
 
 describe('store', () => {
   beforeEach(() => {
@@ -36,6 +69,7 @@ describe('store', () => {
     dbMock.loadConversations.mockResolvedValue([]);
     dbMock.saveConversation.mockResolvedValue(undefined);
     dbMock.deleteConversation.mockResolvedValue(undefined);
+    executeToolMock.mockResolvedValue({ ok: true, output: '' });
   });
 
   it('loads models on creation and auto-selects first', async () => {
@@ -489,5 +523,274 @@ describe('store', () => {
     expect(assistant.reasoning).toContain('Need more info');
     expect(assistant.sources).toHaveLength(2);
     expect(streamChat).toHaveBeenCalledTimes(3);
+  });
+
+  it('handles incomplete [SEARCH directive without closing bracket', async () => {
+    const searchResults = [
+      { title: 'Space Images', url: 'https://nasa.gov', content: 'nebula photos' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[SEARCH: james webb nebula images' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Here are some stunning nebula images [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('Find me similar space images');
+
+    expect(webSearch).toHaveBeenCalledWith('james webb nebula images');
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Here are some stunning nebula images [1].');
+    expect(assistant.sources).toHaveLength(1);
+  });
+
+  it('strips Gemma-style thinking-as-content before search', async () => {
+    const searchResults = [
+      { title: 'Result', url: 'https://example.com', content: 'info' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: 'Thought process\n\nThe user wants space images. ' };
+          yield { type: 'content', text: 'I should search for this.\n\n' };
+          yield { type: 'content', text: '[SEARCH: space nebula images]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Here are the images [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('Find space images');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Here are the images [1].');
+    expect(assistant.content).not.toContain('Thought process');
+    expect(assistant.reasoning).toContain('user wants space images');
+  });
+
+  it('strips <think> blocks from content into reasoning', async () => {
+    const searchResults = [
+      { title: 'Result', url: 'https://example.com', content: 'info' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '<think>\nI need to search for this topic.\n</think>\n' };
+          yield { type: 'content', text: '[SEARCH: test query]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Answer from search [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('question');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Answer from search [1].');
+    expect(assistant.content).not.toContain('<think>');
+    expect(assistant.reasoning).toContain('I need to search');
+  });
+
+  it('caps sources at MAX_SOURCES across multiple rounds', async () => {
+    let searchCount = 0;
+    webSearch.mockImplementation(() => {
+      searchCount++;
+      return Promise.resolve([
+        { title: `A${searchCount}`, url: `https://a${searchCount}.com`, content: 'a' },
+        { title: `B${searchCount}`, url: `https://b${searchCount}.com`, content: 'b' },
+        { title: `C${searchCount}`, url: `https://c${searchCount}.com`, content: 'c' },
+      ]);
+    });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[SEARCH: first]' };
+        })();
+      }
+      if (callCount === 2) {
+        return (async function* () {
+          yield { type: 'content', text: '[SEARCH: second]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Answer.' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('test');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.sources.length).toBeLessThanOrEqual(5);
+  });
+
+  // --- Tool loop tests ---
+
+  it('executes [TOOL: shell] and feeds result back to model', async () => {
+    executeToolMock
+      .mockResolvedValueOnce({ ok: true, output: '', code: undefined })  // pre-check: safe
+      .mockResolvedValueOnce({ ok: true, output: 'file1.js\nfile2.js\n', duration: 10 });  // actual execution is via direct call
+
+    // But the store calls executeToolApi for pre-check only when needed
+    // For safe commands, pre-check returns ok (no NEEDS_APPROVAL)
+    executeToolMock.mockResolvedValue({ ok: true, output: 'file1.js\nfile2.js\n', duration: 10 });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[TOOL: shell {"cmd": "ls"}]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'You have file1.js and file2.js.' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('list my files');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('You have file1.js and file2.js.');
+    expect(assistant.toolCalls).toHaveLength(1);
+    expect(assistant.toolCalls[0].tool).toBe('shell');
+    expect(assistant.toolCalls[0].params.cmd).toBe('ls');
+    expect(streamChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles [TOOL: search] same as [SEARCH:]', async () => {
+    const searchResults = [
+      { title: 'Result', url: 'https://example.com', content: 'info' },
+    ];
+    webSearch.mockResolvedValue(searchResults);
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[TOOL: search {"query": "test news"}]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Here is the news [1].' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('whats new?');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('Here is the news [1].');
+    expect(assistant.sources).toHaveLength(1);
+    expect(assistant.toolCalls).toHaveLength(1);
+    expect(assistant.toolCalls[0].tool).toBe('search');
+  });
+
+  it('tracks tool calls with status lifecycle', async () => {
+    executeToolMock.mockResolvedValue({ ok: true, output: 'hello\n', duration: 5 });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[TOOL: shell {"cmd": "echo hello"}]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'Done.' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('say hello');
+
+    const tc = store.activeMessages[1].toolCalls[0];
+    expect(tc.status).toBe('completed');
+    expect(tc.tool).toBe('shell');
+    expect(tc.id).toBeTruthy();
+  });
+
+  it('handles blocked tool calls gracefully', async () => {
+    executeToolMock.mockResolvedValue({ ok: false, error: 'Command blocked', code: 'BLOCKED' });
+
+    let callCount = 0;
+    streamChat.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          yield { type: 'content', text: '[TOOL: shell {"cmd": "rm -rf /"}]' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'content', text: 'I cannot run that command.' };
+      })();
+    });
+
+    const { createChatStore } = await import('../lib/store.svelte.js');
+    const store = createChatStore();
+
+    await vi.waitFor(() => expect(store.modelsLoading).toBe(false));
+
+    await store.send('delete everything');
+
+    const assistant = store.activeMessages[1];
+    expect(assistant.content).toBe('I cannot run that command.');
+    expect(assistant.toolCalls[0].status).toBe('failed');
+    expect(streamChat).toHaveBeenCalledTimes(2);
   });
 });

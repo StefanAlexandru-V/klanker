@@ -4,12 +4,14 @@
 
   /**
    * @type {{
-   *   messages: Array<{id: number, role: string, content: string, reasoning?: string, files?: any[], sources?: any[], searchQuery?: string}>,
+   *   messages: Array<{id: number, role: string, content: string, reasoning?: string, files?: any[], sources?: any[], searchQuery?: string, toolCalls?: any[]}>,
    *   loading: boolean,
    *   searching: boolean,
+   *   onapprove?: (forSession: boolean) => void,
+   *   ondeny?: () => void,
    * }}
    */
-  let { messages, loading, searching } = $props();
+  let { messages, loading, searching, onapprove, ondeny } = $props();
 
   let container = $state(null);
   let userScrolledUp = $state(false);
@@ -31,10 +33,13 @@
     userScrolledUp = false;
   }
 
-  const lastContent = $derived(messages.length ? messages[messages.length - 1].content : '');
+  const lastMsg = $derived(messages.length ? messages[messages.length - 1] : null);
+  const lastContent = $derived(lastMsg?.content ?? '');
+  const lastToolCalls = $derived(lastMsg?.toolCalls?.length ?? 0);
 
   $effect(() => {
     void lastContent;
+    void lastToolCalls;
     if (messages.length && container && !userScrolledUp) {
       tick().then(() => {
         container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
@@ -86,8 +91,11 @@
             images={msg.images}
             sources={msg.sources}
             searchQuery={msg.searchQuery}
+            toolCalls={msg.toolCalls}
             loading={loading && i === messages.length - 1}
             searching={searching && i === messages.length - 1}
+            {onapprove}
+            {ondeny}
           />
         {/each}
       </div>

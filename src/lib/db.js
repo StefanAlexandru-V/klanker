@@ -46,6 +46,7 @@ export async function saveConversation(conversation) {
             reasoning: msg.reasoning || '',
             sources: msg.sources || [],
             search_query: msg.searchQuery || '',
+            tool_calls: msg.toolCalls || [],
           }),
         });
       } else {
@@ -60,6 +61,7 @@ export async function saveConversation(conversation) {
             searchQuery: msg.searchQuery || '',
             files: msg.files || [],
             images: msg.images || [],
+            toolCalls: msg.toolCalls || [],
           }),
         });
         if (resp.ok) {
@@ -99,6 +101,7 @@ function normalizeConversation(conv) {
       searchQuery: m.search_query || m.searchQuery || '',
       files: m.files || [],
       images: m.images || [],
+      toolCalls: m.tool_calls || m.toolCalls || [],
     })),
     createdAt: conv.created_at || conv.createdAt,
     updatedAt: conv.updated_at || conv.updatedAt,

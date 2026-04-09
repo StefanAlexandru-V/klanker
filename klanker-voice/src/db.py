@@ -63,6 +63,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             search_query    TEXT DEFAULT '',
             files           TEXT DEFAULT '[]',
             images          TEXT DEFAULT '[]',
+            tool_calls      TEXT DEFAULT '[]',
             created_at      REAL NOT NULL,
             UNIQUE(id, conversation_id)
         );
@@ -72,6 +73,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_conversations_updated
             ON conversations(updated_at DESC);
     """)
+    # Migration: add tool_calls column if missing (matches web app api.js migration)
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "tool_calls" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT DEFAULT '[]'")
 
 
 def _now() -> float:
@@ -149,12 +154,13 @@ def add_message(
     search_query: str = "",
     files: list | None = None,
     images: list | None = None,
+    tool_calls: list | None = None,
 ) -> int:
     now = _now()
     cur = conn.execute(
         """INSERT INTO messages
-           (conversation_id, role, content, reasoning, sources, search_query, files, images, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (conversation_id, role, content, reasoning, sources, search_query, files, images, tool_calls, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             conv_id,
             role,
@@ -164,6 +170,7 @@ def add_message(
             search_query,
             json.dumps(files or []),
             json.dumps(images or []),
+            json.dumps(tool_calls or []),
             now,
         ),
     )
@@ -173,12 +180,12 @@ def add_message(
 
 
 def update_message(conn: sqlite3.Connection, msg_id: int, **kwargs) -> None:
-    allowed = {"content", "reasoning", "sources", "search_query", "files", "images"}
+    allowed = {"content", "reasoning", "sources", "search_query", "files", "images", "tool_calls"}
     fields = {}
     for k, v in kwargs.items():
         if k not in allowed:
             continue
-        if k in ("sources", "files", "images") and isinstance(v, list):
+        if k in ("sources", "files", "images", "tool_calls") and isinstance(v, list):
             fields[k] = json.dumps(v)
         else:
             fields[k] = v
@@ -197,7 +204,7 @@ def load_messages(conn: sqlite3.Connection, conv_id: str) -> list[dict]:
     result = []
     for r in rows:
         m = dict(r)
-        for field in ("sources", "files", "images"):
+        for field in ("sources", "files", "images", "tool_calls"):
             try:
                 m[field] = json.loads(m[field]) if m[field] else []
             except (json.JSONDecodeError, TypeError):

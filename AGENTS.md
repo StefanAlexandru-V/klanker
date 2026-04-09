@@ -21,7 +21,7 @@
 
 Two applications sharing a SQLite database:
 
-1. **Klanker Web** — Svelte 5 + Vite chat app with SSE streaming, web search, file/image support
+1. **Klanker Web** — Svelte 5 + Vite chat app with SSE streaming, web search, file/image support, LLM tool framework (shell, read_file, search)
 2. **Klanker Voice** — Python voice assistant with wake word, STT, LLM streaming, floating widget
 
 Both talk to the same **LM Studio** instance and **SearXNG** for web search.
@@ -40,12 +40,14 @@ src/
     fileParser.js          # Text extraction from file types (PDF, DOCX, XLSX, etc.)
     fileHandler.js         # File processing pipeline (image/document handling)
     search.js              # Web search integration via SearXNG
+    tools.js               # Tool directive parser, API client, system prompt builder
   components/
     Chat.svelte            # Scrollable message list with smart auto-scroll + scroll-to-bottom
     Message.svelte         # Message bubble orchestrator (markdown + citation styling)
     MessageAttachments.svelte  # Image and file attachment display
     MessageSources.svelte  # Web search source citation chips
     ThinkingBlock.svelte   # Collapsible reasoning/thought display
+    ToolCall.svelte        # Tool call status display with approve/deny buttons
     Input.svelte           # Textarea + send/stop buttons + drag-and-drop
     FileAttachments.svelte # Pending file/image attachment UI
     Sidebar.svelte         # Conversation list layout shell
@@ -54,9 +56,16 @@ src/
     ModelSelector.svelte   # Model dropdown with keyboard navigation + auto-focus
   __tests__/
     api.test.js            # streamChat tests with mocked fetch/ReadableStream
-    store.test.js          # Store integration tests (35 tests)
+    store.test.js          # Store integration tests (28 tests — search, tools, streaming)
+    tools.test.js          # Tool parsing + prompt builder tests (23 tests)
 server/
-  api.js                   # Node.js SQLite API server (better-sqlite3) — 8 REST endpoints
+  api.js                   # Node.js SQLite API server (better-sqlite3) — 10 REST endpoints
+  tools/
+    registry.js            # Tool definitions (search, shell, read_file)
+    classify.js            # 3-tier command classifier (safe/approval/blocked)
+    shell.js               # Shell executor with timeout + truncation
+    readFile.js            # File reader with path validation + binary detection
+    __tests__/             # 56 server-side unit tests (classify, shell, readFile)
 ```
 
 ### Voice App
@@ -102,7 +111,9 @@ The web app talks to SQLite via the API server (`server/api.js` on port 3100, pr
 
 **Data flow (voice):** Wake word → Record audio → Whisper STT → LLM stream (with search loop) → Widget displays response → Auto-listen for follow-up or dismiss.
 
-**Search flow (both):** Model outputs `[SEARCH: query]` → detected in stream → SearXNG query → results injected into system prompt → model re-prompted → streams answer with citations.
+**Tool flow (web):** Model outputs `[TOOL: name {params}]` → parsed by `tools.js` → pre-check classification → approval if needed → execute → result injected as conversation turn → model re-prompted. Up to 5 rounds per message. Tool results accumulate as assistant/user turn pairs so the model sees its full history.
+
+**Search flow (both):** Model outputs `[TOOL: search {"query": "..."}]` or `[SEARCH: query]` → detected in stream → SearXNG query → results injected → model re-prompted → streams answer with citations.
 
 ## Voice App Details
 
@@ -172,8 +183,6 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `VITE_API_BASE` | `http://10.3.58.20:1234/v1` | LM Studio API base URL |
-| `VITE_MODEL_ID` | `qwen/qwen2.5-coder-14b` | Model identifier |
-| `VITE_SYSTEM_PROMPT` | `You are a helpful assistant.` | System prompt prepended to all requests |
 
 ### Voice App
 
@@ -187,7 +196,8 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 
 ### Web (Vitest)
 - `api.test.js` mocks `fetch` with `vi.stubGlobal` and constructs `ReadableStream` to simulate SSE chunks.
-- `store.test.js` mocks `../lib/api.js` module to isolate store logic from network. Includes search flow tests covering reasoning-as-content, multi-round search, source dedup, and buffered streaming.
+- `store.test.js` mocks `../lib/api.js` module to isolate store logic from network. Includes search flow, tool execution, blocked tools, thinking-as-content, multi-round search, source dedup, and buffered streaming.
+- `tools.test.js` — 23 tests: parseTool directive extraction, incomplete directives, buildToolPrompt generation.
 - Svelte plugin processes `.svelte.js` files during test runs, so runes work in tests.
 
 ### Voice (Pytest)
@@ -202,20 +212,19 @@ Configured in `.env`, prefixed with `VITE_` for client-side access:
 - SSE parsing in `api.js` handles chunks split across `ReadableStream` reads by buffering incomplete lines — don't assume one read = one SSE event.
 - `streamChat` is an **async generator** — consumers must use `for await...of` and handle `AbortError` for cancellation.
 - The store sends the full conversation history (including system prompt) on every request — there is no server-side session.
-- **Search buffering**: `streamResponse` buffers content when `bufferForSearch: true` to detect `[SEARCH:]` directives before writing to reactive state. Some models (Qwen) dump reasoning as content tokens — the search loop extracts text before `[SEARCH:]` and moves it to `msg.reasoning`.
+- **Tool buffering**: `streamResponse` buffers content to detect `[TOOL:]` and `[SEARCH:]` directives before writing to reactive state. Some models (Qwen/Gemma) dump reasoning as content tokens — the tool loop extracts text before directives and moves it to `msg.reasoning`.
 - **SearXNG JSON format**: Must be enabled in `searxng/settings.yml` under `search.formats`. Without it, all JSON API calls return 403.
-- **System prompt is in `store.svelte.js`** (web) and `llm.py` (voice): Both contain vision, search, and behavior instructions. Keep them in sync when tuning model behavior.
+- **System prompt is in `store.svelte.js`** (web) and `llm.py` (voice): The web prompt is `BASE_SYSTEM_PROMPT` + dynamic tool section from `/api/tools`. The voice prompt has search instructions only. Keep behavior sections in sync when tuning.
 - **Voice: wake listener must stop before recording** — both use the same mic. The 300ms delay after stopping ensures the device is released.
 - **Voice: `WA_TranslucentBackground` breaks on Windows** — causes ghost window artifacts. Use solid dark background with `border-radius` instead.
 - **Voice: `QTimer.singleShot` from background threads is unreliable on Windows** — always use QThread + Qt signals for cross-thread communication.
 - **Voice: httpx async generators must use `break` not `return`** — `return` inside `async for` abandons the stream without cleanup, causing "Task was destroyed" warnings.
 - **Voice: Python 3.14 is too new** — `faster-whisper` and other deps don't have wheels. Use Python 3.12 on Windows.
-- **Web app db.js was migrated from IndexedDB to HTTP API** — now calls `server/api.js` REST endpoints. The `idb` package is still in deps but unused.
+- **Web app db.js was migrated from IndexedDB to HTTP API** — now calls `server/api.js` REST endpoints. The `idb` package has been removed.
+- **Tool framework classifier order matters** — the `||` chain check must run before the `|` pipe check in `classify.js`, otherwise `||` gets split on single `|` and produces empty segments.
 
 ## Pending / TODO
 
-- **Web app SQLite migration untested end-to-end** — `server/api.js` and new `db.js` are written but the web app hasn't been tested with the API server yet. Need to run `npm run dev:full` and verify conversations load/save.
-- **Remove `idb` dependency** from package.json once SQLite migration is confirmed working.
 - **Wake word training** — `hey_clanker.onnx` was trained via Google Colab. For re-training or improvements, use `train/train_on_gpu.bat` on an NVIDIA GPU machine, or the Docker trainer in `train/openwakeword-training/`.
 
 ## Dev Server

@@ -11,6 +11,8 @@
  *   GET    /api/conversations/:id/messages — list messages
  *   POST   /api/conversations/:id/messages — add { role, content, reasoning, sources, ... }
  *   PUT    /api/messages/:id               — update message fields
+ *   GET    /api/tools                      — list available tools
+ *   POST   /api/tools/execute              — execute a tool
  *
  * @module api-server
  */
@@ -20,6 +22,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
+import { listTools, executeTool } from './tools/registry.js';
 
 const PORT = parseInt(process.env.KLANKER_API_PORT || '3100', 10);
 
@@ -64,6 +67,13 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
   `);
+
+  // Migration: add tool_calls column if missing
+  const cols = db.pragma('table_info(messages)').map((c) => c.name);
+  if (!cols.includes('tool_calls')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN tool_calls TEXT DEFAULT '[]'`);
+  }
+
   return db;
 }
 
@@ -104,6 +114,7 @@ function formatMessage(row) {
     sources: parseJsonField(row.sources),
     files: parseJsonField(row.files),
     images: parseJsonField(row.images),
+    tool_calls: parseJsonField(row.tool_calls),
   };
 }
 
@@ -119,10 +130,10 @@ const stmts = {
   deleteConv: db.prepare('DELETE FROM conversations WHERE id = ?'),
   listMsgs: db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC'),
   insertMsg: db.prepare(`
-    INSERT INTO messages (conversation_id, role, content, reasoning, sources, search_query, files, images, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (conversation_id, role, content, reasoning, sources, search_query, files, images, tool_calls, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
-  updateMsg: db.prepare('UPDATE messages SET content = ?, reasoning = ?, sources = ?, search_query = ? WHERE id = ?'),
+  updateMsg: db.prepare('UPDATE messages SET content = ?, reasoning = ?, sources = ?, search_query = ?, tool_calls = ? WHERE id = ?'),
   touchConv: db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?'),
 };
 
@@ -142,6 +153,12 @@ async function handleRequest(req, res) {
   }
 
   try {
+    // Tool endpoints
+    if (path.startsWith('/api/tools')) {
+      const handled = await handleToolRequest(req, res, method, path);
+      if (handled !== false) return;
+    }
+
     // GET /api/conversations
     if (method === 'GET' && path === '/api/conversations') {
       const convs = stmts.listConvs.all();
@@ -205,6 +222,7 @@ async function handleRequest(req, res) {
         body.search_query || body.searchQuery || '',
         JSON.stringify(body.files || []),
         JSON.stringify(body.images || []),
+        JSON.stringify(body.tool_calls || body.toolCalls || []),
         ts,
       );
       stmts.touchConv.run(ts, convId);
@@ -219,6 +237,7 @@ async function handleRequest(req, res) {
         body.reasoning ?? '',
         JSON.stringify(body.sources || []),
         body.search_query || body.searchQuery || '',
+        JSON.stringify(body.tool_calls || body.toolCalls || []),
         parseInt(msgUpdateMatch[1], 10),
       );
       return json(res, { ok: true });
@@ -229,6 +248,29 @@ async function handleRequest(req, res) {
     console.error('[api-server]', err);
     json(res, { error: err.message }, 500);
   }
+}
+
+async function handleToolRequest(req, res, method, path) {
+  // GET /api/tools
+  if (method === 'GET' && path === '/api/tools') {
+    return json(res, listTools());
+  }
+
+  // POST /api/tools/execute
+  if (method === 'POST' && path === '/api/tools/execute') {
+    const body = await parseBody(req);
+    const { tool, params, approved } = body;
+
+    if (!tool) {
+      return json(res, { ok: false, error: 'Missing tool name', code: 'ERROR' }, 400);
+    }
+
+    const result = await executeTool(tool, params || {}, { approved: !!approved });
+    const status = result.ok ? 200 : (result.code === 'BLOCKED' ? 403 : result.code === 'UNKNOWN_TOOL' ? 404 : 200);
+    return json(res, result, status);
+  }
+
+  return false;
 }
 
 const server = createServer(handleRequest);
